@@ -1,0 +1,28 @@
+{% extends 'orders/checkout_review.html' %}
+{% load shop_extras %}
+{% block content %}
+<div class="container-page py-8">{% include 'partials/checkout_steps_v2.html' %}<header class="page-heading mt-8">
+<h1 class="section-title">بررسی سفارش</h1><p class="mt-2 text-muted">کالاها، نشانی تحویل و مبلغ نهایی را پیش از ثبت بررسی کنید.</p>
+</header>
+<div class="workflow-layout">
+<div>
+<section class="card p-6 sm:p-8">
+<div class="section-head">
+<h2 class="text-lg">گیرنده سفارش</h2><a class="btn-outline btn-sm" href="{% url 'orders:checkout' %}">تغییر آدرس</a>
+</div><p>{{ address.receiver_name }}</p><p class="mt-2 text-sm leading-7 text-muted">{{ address.single_line }}</p><bdi dir="ltr">{{ address.receiver_phone }}</bdi>
+</section>
+<section class="card mt-6 p-6 sm:p-8">
+<h2 class="mb-4 text-lg">اقلام سفارش</h2>
+<ul class="divide-y divide-line">{% for item in items %}<li class="grid grid-cols-[64px_minmax(0,1fr)] gap-4 py-4">{% with image=item.variant.product.primary_image %}<div class="h-20 overflow-hidden rounded-md bg-sand">{% if image %}<img src="{{ image.image.url }}" alt="{{ image.alt|default:item.variant.product.name }}" width="128" height="160" class="h-full w-full object-cover" loading="lazy">{% endif %}</div>{% endwith %}<div>
+<h3 class="text-sm">{{ item.variant.product.name }}</h3><p class="mt-1 text-xs text-muted">{{ item.variant.color.name }} / {{ item.variant.size.name }} · تعداد {{ item.quantity }}</p><p class="mt-2 text-sm font-semibold">{{ item.line_total|currency }}</p>
+</div>
+</li>{% endfor %}</ul>
+</section>
+<form method="post" class="card mt-6 flex flex-col gap-5 p-6 sm:p-8">{% csrf_token %}{% include 'partials/accessible_fields.html' with form=note_form %}<p class="text-sm text-muted">با ثبت سفارش، کالاها رزرو می‌شوند و برای پرداخت به درگاه انتقال پیدا می‌کنید.</p><button class="btn-primary btn-lg" type="submit">ثبت سفارش و پرداخت {{ totals.total|currency }}</button>
+</form>
+</div>
+<aside class="workflow-summary">{% include 'partials/order_summary.html' %}<a class="btn-outline mt-4 w-full" href="{% url 'cart:detail' %}">بازگشت به سبد خرید</a>
+</aside>
+</div>
+</div>
+{% endblock %}

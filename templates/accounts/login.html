@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+
+{% block title %}ورود با شماره موبایل | {{ STORE_NAME }}{% endblock %}
+
+{% block content %}
+<div class="surface-soft">
+  <div class="container-page flex min-h-[72vh] items-center justify-center py-12 sm:py-16">
+    <div class="grid w-full max-w-4xl overflow-hidden rounded-xl border border-line bg-white shadow-lift lg:grid-cols-[0.9fr_1.1fr]">
+      <!-- پنل برند -->
+      <div class="banner-promo relative hidden flex-col justify-between gap-8 rounded-none p-8 lg:flex">
+        <div class="flex items-center gap-2.5">
+          <span class="grid h-10 w-10 place-items-center rounded-2xl bg-gradient-to-br from-accent to-ink text-xl font-bold text-paper ring-1 ring-white/15" aria-hidden="true">ل</span>
+          <span class="text-lg font-bold">{{ STORE_NAME }}</span>
+        </div>
+        <div>
+          <span class="inline-flex items-center gap-2 rounded-full bg-gold/20 px-3.5 py-1.5 text-xs font-bold text-gold ring-1 ring-gold/40">ورود امن بدون رمز</span>
+          <p class="mt-4 text-2xl font-bold leading-10">فقط با شماره موبایل وارد شو</p>
+          <p class="mt-2 max-w-sm text-sm leading-7 text-paper/70">کد تأیید یک‌بارمصرف برایت پیامک می‌شود؛ بدون نیاز به حفظ کردن رمز عبور.</p>
+          <ul class="mt-6 flex flex-col gap-3 text-[13px] text-paper/75">
+            <li class="flex items-center gap-2.5">
+              <svg class="h-4 w-4 text-gold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 5 5 10-10.5"/></svg>
+              پیگیری سفارش و آدرس‌های ذخیره‌شده
+            </li>
+            <li class="flex items-center gap-2.5">
+              <svg class="h-4 w-4 text-gold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 5 5 10-10.5"/></svg>
+              تسویه سریع‌تر با اطلاعات آماده
+            </li>
+            <li class="flex items-center gap-2.5">
+              <svg class="h-4 w-4 text-gold" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 5 5 10-10.5"/></svg>
+              امنیت با کد یک‌بارمصرف و محدودیت تلاش
+            </li>
+          </ul>
+        </div>
+        <p class="text-xs text-paper/50">پشتیبانی: <span class="ltr font-bold tabular-nums" dir="ltr">{{ STORE_PHONE }}</span></p>
+      </div>
+
+      <!-- فرم -->
+      <div class="p-6 sm:p-10">
+        <div class="mb-7 flex flex-col items-start gap-3">
+          <span class="icon-circle-accent h-13 w-13">
+            <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.6" aria-hidden="true">
+              <rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/>
+              <path stroke-linecap="round" d="M10.75 18.5h2.5"/>
+            </svg>
+          </span>
+          <div>
+            <h1 class="text-2xl font-bold tracking-tight">ورود / ثبت‌نام</h1>
+            <p class="mt-2 text-sm leading-7 text-muted">
+              برای ورود، فقط شماره موبایل خود را وارد کنید؛ کد تأیید برای شما پیامک می‌شود.
+            </p>
+          </div>
+        </div>
+
+        <form method="post" action="{% url 'accounts:login' %}" class="flex flex-col gap-4">
+          {% csrf_token %}
+          {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+          {% include "partials/form_fields.html" with form=form %}
+
+          <button type="submit" class="btn-primary btn-lg btn-shine btn-block mt-2">
+            ارسال کد تأیید
+            <svg class="h-4 w-4 rtl:rotate-180" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 12H4.5m0 0 6-6m-6 6 6 6"/>
+            </svg>
+          </button>
+        </form>
+
+        <div class="divider my-6"></div>
+
+        <p class="text-center text-xs leading-6 text-muted">
+          با ورود به سایت، <span class="font-medium text-ink-soft">قوانین و مقررات</span> فروشگاه را می‌پذیرید.
+        </p>
+
+        <div class="mt-5 flex flex-wrap items-center justify-center gap-2 text-xs">
+          <a href="{% url 'store:product_list' %}" class="chip">بازگشت به فروشگاه</a>
+          <a href="{% url 'cart:detail' %}" class="chip">سبد خرید</a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

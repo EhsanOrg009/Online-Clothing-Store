@@ -1,0 +1,7 @@
+{% load shop_extras %}
+<ol class="order-activity" aria-label="رویدادهای ثبت‌شدهٔ سفارش">
+  <li><span class="activity-dot"></span><div><strong>ثبت سفارش</strong><p>{% jalali_datetime order.created_at %}</p></div></li>
+  {% if order.paid_at %}<li><span class="activity-dot"></span><div><strong>تأیید پرداخت</strong><p>{% jalali_datetime order.paid_at %}</p></div></li>{% endif %}
+  {% if order.shipped_at %}<li><span class="activity-dot"></span><div><strong>ارسال سفارش</strong><p>{% jalali_datetime order.shipped_at %}</p></div></li>{% endif %}
+  {% if order.delivered_at %}<li><span class="activity-dot"></span><div><strong>تحویل سفارش</strong><p>{% jalali_datetime order.delivered_at %}</p></div></li>{% endif %}
+</ol>

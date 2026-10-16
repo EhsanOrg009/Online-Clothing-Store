@@ -1,0 +1,113 @@
+{% load static shop_extras %}<!DOCTYPE html>
+<html lang="fa" dir="rtl" class="h-full">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#6D214F">
+  <link rel="icon" href="{% static 'favicon.svg' %}" type="image/svg+xml">
+  {% block meta_title %}
+  <title>{% block title %}{{ STORE_NAME }}{% endblock %}</title>
+  {% endblock %}
+  <meta name="description" content="{% block meta_description %}فروشگاه اینترنتی {{ STORE_NAME }} — انتخاب پوشاک بر اساس رنگ، سایز و قیمت و پیگیری سفارش از حساب کاربری.{% endblock %}">
+  <link rel="canonical" href="{{ request.build_absolute_uri }}">
+
+  <link rel="preload" as="font" type="font/woff2" href="{% static 'fonts/Vazirmatn-Regular.woff2' %}" crossorigin>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+
+  {% block extra_head %}{% endblock %}
+</head>
+
+<body class="flex min-h-full flex-col bg-sand text-ink antialiased">
+
+  <a href="#main" class="sr-only focus:not-sr-only focus:fixed focus:start-4 focus:top-4 focus:z-[60]
+                         focus:rounded-full focus:bg-ink focus:px-5 focus:py-3 focus:text-sm focus:text-paper">
+    رفتن به محتوای اصلی
+  </a>
+
+  {% include "partials/header.html" %}
+
+  {% if messages %}
+    <div class="pointer-events-none fixed inset-x-0 top-24 z-50 flex flex-col items-center gap-2 px-4"
+         id="toast-stack" role="status" aria-live="polite">
+      {% for message in messages %}
+        <div class="pointer-events-auto flex w-full max-w-md items-start gap-3 rounded-card border px-4 py-3.5 text-sm shadow-pop
+                    {% if message.tags == 'error' %}border-sale/25 bg-sale text-white
+                    {% elif message.tags == 'success' %}border-success/25 bg-success text-white
+                    {% elif message.tags == 'warning' %}border-warning/25 bg-warning text-white
+                    {% else %}border-line bg-ink text-paper{% endif %}"
+             x-data="{ open: true }"
+             {% if message.tags != 'error' %}x-init="setTimeout(() => open = false, 6000)"{% endif %}
+             x-show="open"
+             x-transition:enter="transition ease-out duration-200"
+             x-transition:enter-start="opacity-0 -translate-y-2"
+             x-transition:enter-end="opacity-100 translate-y-0"
+             x-transition:leave="transition ease-in duration-150"
+             x-transition:leave-end="opacity-0 -translate-y-2">
+          <span class="mt-0.5 shrink-0" aria-hidden="true">
+            {% if message.tags == 'error' %}
+              <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12"/>
+              </svg>
+            {% elif message.tags == 'success' %}
+              <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6">
+                <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 5 5 10-10.5"/>
+              </svg>
+            {% elif message.tags == 'warning' %}
+              <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1">
+                <circle cx="12" cy="12" r="9"/><path stroke-linecap="round" d="M12 7.5v5M12 16.25h.008"/>
+              </svg>
+            {% else %}
+              <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="9"/><path stroke-linecap="round" d="M12 11v5M12 7.75h.008"/>
+              </svg>
+            {% endif %}
+          </span>
+          <span class="flex-1 leading-6">{{ message }}</span>
+          <button type="button" class="shrink-0 opacity-70 transition-opacity hover:opacity-100" @click="open = false" aria-label="بستن پیام">
+            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z"/>
+            </svg>
+          </button>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <main id="main" class="flex-1">
+    {% block content %}{% endblock %}
+  </main>
+
+  {% include "partials/footer.html" %}
+
+  <script src="{% static 'vendor/htmx.min.js' %}" nonce="{{ csp_nonce }}" defer></script>
+  <script src="{% static 'vendor/alpine.min.js' %}" nonce="{{ csp_nonce }}" defer></script>
+
+  <script nonce="{{ csp_nonce }}">
+    // دکمه‌های +/− فیلد تعداد در سبد خرید (بدون نیاز به نمایش Inline Event Handler)
+    document.addEventListener('click', function (event) {
+      const button = event.target.closest('[data-qty-step]');
+      if (!button) return;
+      event.preventDefault();
+      const form = button.closest('form');
+      const input = form && form.querySelector('input[name="quantity"]');
+      if (!input) return;
+      const step = parseInt(button.getAttribute('data-qty-step'), 10) || 0;
+      const min = parseInt(input.min || '1', 10);
+      const max = input.max ? parseInt(input.max, 10) : Number.MAX_SAFE_INTEGER;
+      const current = parseInt(input.value, 10) || min;
+      input.value = Math.min(max, Math.max(min, current + step));
+      if (typeof form.requestSubmit === 'function') form.requestSubmit();
+      else form.submit();
+    });
+
+    // تأیید عملیات حساس (به‌جای OnSubmit Inline که توسط CSP مسدود می‌شود)
+    document.addEventListener('submit', function (event) {
+      const form = event.target.closest('form[data-confirm]');
+      if (!form) return;
+      if (!window.confirm(form.getAttribute('data-confirm'))) event.preventDefault();
+    });
+  </script>
+
+  {% block extra_js %}{% endblock %}
+</body>
+</html>

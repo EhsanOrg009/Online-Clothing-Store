@@ -1,0 +1,78 @@
+{% extends 'base.html' %}
+{% load shop_extras %}
+{% block title %}{{ product.name }} | {{ STORE_NAME }}{% endblock %}
+{% block meta_description %}{{ product.description|default:product.name|truncatechars:160 }}{% endblock %}
+{% block content %}
+{{ colors_data|json_script:'colors-data' }}
+{{ variants_data|json_script:'variants-data' }}
+<div class="container-page py-8">
+  <nav class="breadcrumbs" aria-label="مسیر صفحه"><ol><li><a href="{% url 'store:home' %}">خانه</a></li><li aria-hidden="true">/</li><li><a href="{% url 'store:category' product.category.slug %}">{{ product.category.name }}</a></li><li aria-hidden="true">/</li><li aria-current="page">{{ product.name }}</li></ol></nav>
+  <div class="product-layout">
+    <section class="product-gallery" aria-label="تصاویر محصول">
+      <div class="gallery-main">
+        {% if images %}
+          <img id="product-image" src="{{ images.0.image.url }}" alt="{{ images.0.alt|default:product.name }}" width="900" height="1200" fetchpriority="high">
+          <button type="button" class="gallery-zoom btn-outline btn-sm" data-gallery-zoom hidden aria-haspopup="dialog">{% include 'partials/icon.html' with kind='search' %} بزرگ‌نمایی تصویر</button>
+        {% else %}
+          <div class="media-fallback">{% include 'partials/icon.html' with kind='shirt' %}<p>تصویری برای این محصول ثبت نشده است</p></div>
+        {% endif %}
+      </div>
+      {% if images|length > 1 %}
+        <div class="gallery-thumbs" role="group" aria-label="انتخاب تصویر">
+          {% for image in images %}<button type="button" data-gallery-src="{{ image.image.url }}" data-gallery-alt="{{ image.alt|default:product.name }}" aria-label="نمایش تصویر {{ forloop.counter }}" aria-pressed="{{ forloop.first|yesno:'true,false' }}"><img src="{{ image.image.url }}" alt="" width="128" height="160" loading="lazy"></button>{% endfor %}
+        </div>
+      {% endif %}
+      <p class="mt-2 text-xs text-muted">رنگ و سایز را در بخش انتخاب محصول بررسی کنید.</p>
+    </section>
+    <section class="product-info" aria-labelledby="product-title">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <a class="text-sm text-accent" href="{% url 'store:category' product.category.slug %}">{{ product.category.name }}</a>
+        {% if product.is_in_stock %}<span class="badge-success">موجود در انبار</span>{% else %}<span class="badge-muted">ناموجود</span>{% endif %}
+      </div>
+      <h1 id="product-title">{{ product.name }}</h1>
+      <div class="product-price">
+        <span class="mb-2 block text-xs text-muted">قیمت محصول</span>
+        <strong>{{ price_info.final_price|currency }}</strong>
+        {% if price_info.has_discount %}<div class="mt-3 flex flex-wrap items-center gap-3"><del class="text-sm text-muted">{{ price_info.base_price|currency }}</del><span class="badge-sale">{{ price_info.discount_percent|percent }} تخفیف</span></div><p class="mt-2 text-sm text-success">صرفه‌جویی {{ price_info.saved_amount|currency }}</p>{% endif %}
+      </div>
+      {% if variants_data %}
+        <form class="purchase-form" id="add-to-cart" method="post" action="{% url 'cart:add_variant' %}" data-product-form data-max-quantity="{{ max_quantity }}">
+          {% csrf_token %}<input name="next" type="hidden" value="{{ request.path }}">
+          <div class="field" data-variant-fallback>
+            <label for="variant-select" class="field-label">رنگ و سایز</label>
+            <select id="variant-select" name="variant_id" class="field-input" required>
+              <option value="">رنگ و سایز را انتخاب کنید</option>
+              {% for variant in variants_data %}<option value="{{ variant.id }}" {% if not variant.available %}disabled{% endif %}>{{ variant.color }} / {{ variant.size }}{% if not variant.available %} — ناموجود{% endif %}</option>{% endfor %}
+            </select>
+          </div>
+          <div data-variant-controls hidden>
+            <fieldset><legend class="field-label mb-3">رنگ</legend><div class="variant-options" data-color-options></div></fieldset>
+            <fieldset class="mt-6"><legend class="field-label mb-3">سایز</legend><div class="variant-options" data-size-options></div></fieldset>
+          </div>
+          <p class="variant-feedback" id="variant-feedback" role="status" aria-live="polite">رنگ و سایز را انتخاب کنید تا موجودی این ترکیب نمایش داده شود.</p>
+          <div class="purchase-controls">
+            <div><label class="field-label mb-2 block" for="id_quantity">تعداد</label><div class="qty-pill"><button type="button" class="btn-ghost" data-product-qty="-1" aria-label="کاهش تعداد">−</button><input class="w-16 bg-transparent text-center" id="id_quantity" name="quantity" type="number" min="1" max="{{ max_quantity }}" value="1" inputmode="numeric"><button type="button" class="btn-ghost" data-product-qty="1" aria-label="افزایش تعداد">+</button></div></div>
+            <button class="btn-primary btn-lg btn-block" type="submit" {% if not product.is_in_stock %}disabled{% endif %}>{% include 'partials/icon.html' with kind='bag' %} افزودن به سبد خرید</button>
+          </div>
+        </form>
+      {% else %}<div class="alert alert-info">ترکیب رنگ و سایز قابل خریدی برای این محصول ثبت نشده است.</div>{% endif %}
+      <div class="product-service"><span>{% include 'partials/icon.html' with kind='truck' %}</span><p>{% if FREE_SHIPPING_MIN_AMOUNT %}ارسال رایگان از {{ FREE_SHIPPING_MIN_AMOUNT|currency }}{% else %}هزینه ارسال: {{ SHIPPING_FEE|currency }}{% endif %}. قیمت نهایی و هزینه ارسال پیش از پرداخت نمایش داده می‌شود.</p></div>
+      <a class="link-arrow mt-4 inline-block" href="tel:{{ STORE_PHONE }}">پرسشی درباره این لباس دارید؟ تماس با فروشگاه</a>
+    </section>
+  </div>
+  <section class="product-details mt-10" aria-label="اطلاعات محصول">
+    {% if product.description %}<div class="card p-6 sm:p-8"><h2 class="text-xl">دربارهٔ این لباس</h2><div class="mt-6 max-w-3xl text-sm leading-8 text-ink-soft">{{ product.description|linebreaksbr }}</div></div>{% endif %}
+    <div class="accordion">
+      <details open><summary>مشخصات و موجودی</summary><dl class="px-6 pb-6"><div class="spec-row"><dt>دسته‌بندی</dt><dd>{{ product.category.name }}</dd></div><div class="spec-row"><dt>کد محصول</dt><dd><bdi>{{ product.slug }}</bdi></dd></div><div class="spec-row"><dt>موجودی کل</dt><dd>{{ product.stock_quantity|fa_num }} عدد</dd></div></dl></details>
+      <details><summary>اطلاعات ارسال</summary><p class="px-6 pb-6 text-sm leading-7">روش ارسال و آدرس گیرنده در مرحله تکمیل خرید نمایش داده می‌شود. برای پرسش درباره شرایط بازگشت کالا با پشتیبانی تماس بگیرید.</p></details>
+    </div>
+  </section>
+  {% if related_products %}<section class="collection-section"><div class="section-head"><div><h2 class="section-title">از همین دسته</h2><p class="section-note">انتخاب‌های دیگری برای مقایسه</p></div><a class="link-arrow" href="{% url 'store:category' product.category.slug %}">همه محصولات دسته</a></div><div class="product-grid">{% for product in related_products %}{% include 'partials/product_card.html' %}{% endfor %}</div></section>{% endif %}
+</div>
+{% if images %}
+<dialog class="gallery-dialog" id="gallery-dialog" aria-labelledby="gallery-dialog-title">
+  <div class="gallery-dialog-bar"><h2 id="gallery-dialog-title" class="text-base">{{ product.name }}</h2><button type="button" class="btn-ghost btn-icon" data-gallery-close aria-label="بستن تصویر">{% include 'partials/icon.html' with kind='close' %}</button></div>
+  <img data-gallery-large alt="" width="900" height="1200">
+</dialog>
+{% endif %}
+{% endblock %}

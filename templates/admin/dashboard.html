@@ -1,0 +1,51 @@
+{% extends 'admin/index.html' %}
+{% load i18n shop_extras %}
+{% block content %}
+<div id="content-main">
+  <section class="shop-hero">
+    <h2>داشبورد فروشگاه</h2>
+    <p>سفارش‌ها، محصولات و موجودی در محدوده دسترسی شما.</p>
+    <div class="shop-quick">
+      {% if perms.products.add_product %}<a href="{% url 'admin:products_product_add' %}">{% include 'partials/icon.html' with kind='edit' %} افزودن محصول</a>{% endif %}
+      {% if perms.orders.view_order or perms.orders.change_order %}<a href="{% url 'admin:orders_order_changelist' %}">{% include 'partials/icon.html' with kind='bag' %} مدیریت سفارش‌ها</a>{% endif %}
+      {% if perms.products.view_productvariant or perms.products.change_productvariant %}<a href="{% url 'admin:products_productvariant_changelist' %}?stock__exact=0">{% include 'partials/icon.html' with kind='shirt' %} بررسی موجودی ناموجود</a>{% endif %}
+      {% if perms.payments.view_payment or perms.payments.change_payment %}<a href="{% url 'admin:payments_payment_changelist' %}?needs_refund__exact=1">{% include 'partials/icon.html' with kind='tag' %} پرداخت‌های نیازمند بازگشت وجه</a>{% endif %}
+    </div>
+  </section>
+  {% if dashboard %}
+    <section class="shop-stats" aria-label="خلاصهٔ عملکرد فروشگاه">
+      {% if dashboard.total_sales != None %}
+        <div class="shop-stat"><span class="shop-stat-icon">{% include 'partials/icon.html' with kind='tag' %}</span><h3>مجموع فروش پرداخت‌شده</h3><p>{{ dashboard.total_sales|currency }}</p><p class="shop-stat-cap">{{ dashboard.paid_orders|fa_num }} سفارش پرداخت‌شده</p></div>
+        <div class="shop-stat"><span class="shop-stat-icon">{% include 'partials/icon.html' with kind='clock' %}</span><h3>در انتظار پرداخت</h3><p>{{ dashboard.pending_payment_orders|fa_num }}</p></div>
+        <div class="shop-stat"><span class="shop-stat-icon">{% include 'partials/icon.html' with kind='truck' %}</span><h3>سفارش‌های ارسال‌شده و تحویل‌شده</h3><p>{{ dashboard.shipped_orders|fa_num }}</p></div>
+      {% endif %}
+      {% if dashboard.total_products != None %}<div class="shop-stat"><span class="shop-stat-icon">{% include 'partials/icon.html' with kind='shirt' %}</span><h3>محصولات منتشرشده</h3><p>{{ dashboard.published_products|fa_num }} از {{ dashboard.total_products|fa_num }}</p></div>{% endif %}
+      {% if dashboard.out_of_stock_variants != None %}<div class="shop-stat"><span class="shop-stat-icon">{% include 'partials/icon.html' with kind='grid' %}</span><h3>ترکیب رنگ و سایز ناموجود</h3><p>{{ dashboard.out_of_stock_variants|fa_num }}</p></div>{% endif %}
+      {% if dashboard.total_users != None %}<div class="shop-stat"><span class="shop-stat-icon">{% include 'partials/icon.html' %}</span><h3>کاربران ثبت‌شده</h3><p>{{ dashboard.total_users|fa_num }}</p></div>{% endif %}
+    </section>
+  {% endif %}
+  <div class="shop-panels">
+    {% if dashboard.recent_orders != None %}
+      <section class="module shop-panel">
+        <h2>{% include 'partials/icon.html' with kind='bag' %} آخرین سفارش‌ها</h2>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="جدول آخرین سفارش‌ها">
+          <table><thead><tr><th scope="col">شماره سفارش</th><th scope="col">مشتری</th><th scope="col">مبلغ</th><th scope="col">وضعیت</th></tr></thead>
+            <tbody>{% for order in dashboard.recent_orders %}<tr><td><a class="ltr" href="{% url 'admin:orders_order_change' order.pk %}">{{ order.order_number }}</a></td><td>{{ order.customer.full_name|default:order.customer.phone_number }}</td><td>{{ order.total|currency }}</td><td><span class="shop-pill {% if order.is_paid %}is-success{% elif order.can_pay %}is-warn{% else %}is-alert{% endif %}">{{ order.status_label }}</span></td></tr>{% empty %}<tr><td colspan="4">هنوز سفارشی ثبت نشده است.</td></tr>{% endfor %}</tbody>
+          </table>
+        </div>
+      </section>
+    {% endif %}
+    {% if dashboard.best_sellers != None %}
+      <section class="module shop-panel">
+        <h2>{% include 'partials/icon.html' with kind='shirt' %} پرفروش‌ترین محصولات بر اساس تعداد کالا</h2>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="جدول پرفروش‌ترین محصولات">
+          <table><thead><tr><th scope="col">محصول</th><th scope="col">تعداد فروش</th></tr></thead>
+            <tbody>{% for product in dashboard.best_sellers %}<tr><td><a href="{% url 'admin:products_product_change' product.pk %}">{{ product.name }}</a></td><td>{{ product.sold|fa_num }}</td></tr>{% empty %}<tr><td colspan="2">هنوز فروشی ثبت نشده است.</td></tr>{% endfor %}</tbody>
+          </table>
+        </div>
+      </section>
+    {% endif %}
+  </div>
+  <div class="app-list">{% include 'admin/app_list.html' with app_list=app_list show_changelinks=True %}</div>
+</div>
+{% endblock %}

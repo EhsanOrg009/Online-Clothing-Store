@@ -1,0 +1,15 @@
+{% load shop_extras %}
+<div class="container-page py-10">
+<section class="card result-panel mx-auto max-w-2xl p-6 sm:p-10"><span class="result-symbol {% if result == 'success' %}is-success{% elif result == 'failed' %}is-failed{% endif %}">{% if result == 'success' %}{% include 'partials/icon.html' with kind='check' %}{% else %}{% include 'partials/icon.html' with kind='close' %}{% endif %}</span><span class="{% if result == 'success' %}badge-success{% elif result == 'failed' %}badge-warning{% else %}badge-muted{% endif %}">{% if result == 'success' %}پرداخت تأیید شد{% elif result == 'failed' %}پرداخت تأیید نشد{% else %}پرداخت لغو شد{% endif %}</span>
+<h1 class="section-title mt-5">{% if result == 'success' %}پرداخت با موفقیت انجام شد{% elif result == 'failed' %}پرداخت ناموفق بود{% else %}از پرداخت انصراف دادید{% endif %}</h1><p class="my-5 text-sm leading-7 text-muted">{% if result == 'success' %}وضعیت تحویل و جزئیات سفارش در حساب شما قابل پیگیری است.{% elif result == 'failed' %}تأیید پرداخت دریافت نشد. اگر مبلغی از حساب شما کم شده است، وضعیت را با بانک و پشتیبانی بررسی کنید.{% else %}برای بررسی وضعیت سفارش و مهلت پرداخت، جزئیات سفارش را ببینید.{% endif %}</p>
+<dl>
+<div class="spec-row"><dt>شماره سفارش</dt><dd><bdi dir="ltr">{{ order.order_number }}</bdi></dd>
+</div>
+<div class="spec-row"><dt>مبلغ سفارش</dt><dd>{{ order.total|currency }}</dd>
+</div>{% if successful_payment.reference_id %}<div class="spec-row"><dt>شماره پیگیری</dt><dd><bdi dir="ltr">{{ successful_payment.reference_id }}</bdi></dd>
+</div>{% endif %}{% if order.can_pay and order.expires_at %}<div class="spec-row"><dt>مهلت پرداخت</dt><dd>{% jalali_datetime order.expires_at %}</dd>
+</div>{% endif %}</dl>{% if result != 'success' and payments.0.error_message %}<p class="alert alert-warning mt-5">{{ payments.0.error_message }}</p>{% endif %}<div class="mt-7 flex flex-wrap gap-3">{% if order.can_pay %}<form method="post" action="{% url 'orders:pay' order.order_number %}">{% csrf_token %}<button class="btn-primary" type="submit">تلاش دوباره برای پرداخت</button>
+</form>{% endif %}<a class="btn-outline" href="{% url 'orders:detail' order.order_number %}">جزئیات و پیگیری سفارش</a><a class="btn-ghost" href="{% url 'store:product_list' %}">ادامه خرید</a>
+</div>
+</section>
+</div>

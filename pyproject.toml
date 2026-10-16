@@ -1,0 +1,25 @@
+[project]
+name = "clothing-shop"
+version = "1.0.0"
+description = "فروشگاه اینترنتی پوشاک - Clothing Shop (Django + MySQL)"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "django>=6.1,<6.2",
+    "django-environ>=0.11",
+    "mysqlclient>=2.2",
+    "pillow>=11.0",
+    "whitenoise>=6.9",
+    "jdatetime>=5.0",
+]
+
+[project.optional-dependencies]
+production = [
+    "gunicorn>=23.0",
+]
+
+[dependency-groups]
+dev = []
+
+[tool.uv]
+package = false

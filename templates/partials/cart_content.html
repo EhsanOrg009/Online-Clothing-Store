@@ -1,0 +1,26 @@
+{% load shop_extras %}
+<span hidden data-cart-total-count="{{ totals.items_count }}"></span>
+{% if is_cart_fragment and messages %}<div class="inline-feedback" data-cart-feedback tabindex="-1" role="status" aria-live="polite">{% for message in messages %}<p class="alert {% if message.tags == 'error' %}alert-error{% else %}alert-success{% endif %} mb-2">{{ message }}</p>{% endfor %}</div>{% endif %}
+{% if items %}<div class="workflow-layout">
+<section aria-label="کالاهای سبد خرید">
+<ul class="cart-items">{% for item in items %}<li class="cart-item">
+<article class="flex gap-4"><a class="block h-28 w-20 shrink-0 overflow-hidden rounded-md bg-sand" href="{% url 'store:product_detail' item.variant.product.slug %}">{% with image=item.variant.product.primary_image %}{% if image %}<img class="h-full w-full object-cover" src="{{ image.image.url }}" alt="{{ image.alt|default:item.variant.product.name }}" width="160" height="224" loading="lazy">{% endif %}{% endwith %}</a>
+<div class="min-w-0 flex-1">
+<h2 class="text-base"><a href="{% url 'store:product_detail' item.variant.product.slug %}">{{ item.variant.product.name }}</a>
+</h2><p class="mt-1 text-xs text-muted">{{ item.variant.color.name }} / {{ item.variant.size.name }}</p><p class="mt-3 text-sm font-bold">{{ item.line_total|currency }}</p>{% if item.line_discount %}<p class="text-xs text-sale">{{ item.line_discount|currency }} تخفیف</p>{% endif %}{% if not item.variant.is_active or not item.variant.product.is_live or item.quantity > item.available_stock %}<p class="alert alert-warning mt-3">موجودی یا وضعیت این کالا تغییر کرده است. تعداد را اصلاح کنید یا کالا را از سبد حذف کنید.</p>{% endif %}<div class="mt-4 flex flex-wrap items-center gap-3">
+<form method="post" action="{% url 'cart:update' item.id %}" hx-post="{% url 'cart:update' item.id %}" hx-target="#cart-content" hx-swap="innerHTML" hx-indicator="#cart-spinner" hx-disabled-elt="find button" class="flex flex-wrap items-center gap-2">{% csrf_token %}<input type="hidden" name="next" value="{% url 'cart:detail' %}">
+<div class="qty-pill"><button class="btn-ghost px-3" type="button" data-qty-step="-1" aria-label="کاهش تعداد {{ item.variant.product.name }}">−</button><label class="sr-only" for="cart-quantity-{{ item.pk }}">تعداد {{ item.variant.product.name }}</label><input id="cart-quantity-{{ item.pk }}" name="quantity" type="number" min="1" max="{{ item.max_quantity }}" value="{{ item.quantity }}" inputmode="numeric" class="w-12 bg-transparent text-center"><button class="btn-ghost px-3" type="button" data-qty-step="1" aria-label="افزایش تعداد {{ item.variant.product.name }}">+</button>
+</div><button class="btn-outline btn-sm" type="submit">بروزرسانی</button>
+</form>
+<form method="post" action="{% url 'cart:remove' item.id %}" hx-post="{% url 'cart:remove' item.id %}" hx-target="#cart-content" hx-swap="innerHTML" hx-indicator="#cart-spinner">{% csrf_token %}<input type="hidden" name="next" value="{% url 'cart:detail' %}"><button type="submit" class="btn-ghost btn-sm text-sale" aria-label="حذف {{ item.variant.product.name }} از سبد خرید">حذف</button>
+</form>
+</div>
+</div>
+</article>
+</li>{% endfor %}</ul>
+</section>
+<aside class="workflow-summary">{% include 'partials/order_summary.html' %}{% if not totals.shipping_fee %}<p class="alert alert-success mt-3">هزینه ارسال این سبد رایگان است.</p>{% elif FREE_SHIPPING_MIN_AMOUNT %}<p class="mt-3 text-sm text-muted">ارسال رایگان برای مبلغ کالاها از {{ FREE_SHIPPING_MIN_AMOUNT|currency }} پس از تخفیف</p>{% endif %}<a class="btn-primary btn-lg mt-5 w-full" href="{% url 'orders:checkout' %}">تکمیل خرید</a><a class="btn-outline mt-3 w-full" href="{% url 'store:product_list' %}">ادامه خرید</a>
+</aside>
+</div>{% else %}<div class="empty-state"><span class="result-symbol">{% include 'partials/icon.html' with kind='bag' %}</span>
+<h2 class="section-title">سبد خرید شما خالی است</h2><p>رنگ و سایز لباس موردنظر را انتخاب کنید تا به سبد خرید اضافه شود.</p><a class="btn-primary" href="{% url 'store:product_list' %}">مشاهده محصولات</a>
+</div>{% endif %}

@@ -1,0 +1,58 @@
+{% extends 'store/home.html' %}
+{% load shop_extras %}
+{% block content %}
+<div class="container-page">
+  <section class="collection-hero" aria-labelledby="collection-title">
+    {% if hero_image %}
+      <figure class="collection-photo"><img src="{{ hero_image.image.url }}" alt="{{ hero_image.alt|default:hero_image.product.name }}" width="1400" height="680" fetchpriority="high"></figure>
+    {% else %}
+      <div class="collection-photo hero-fallback">{% include 'partials/icon.html' with kind='shirt' %}</div>
+    {% endif %}
+    <div class="collection-copy">
+      <h1 id="collection-title">به سلیقهٔ خودتان<br>لباس بپوشید.</h1>
+      <p>از یک رنگ تازه تا لباس هر روز؛ مجموعهٔ {{ STORE_NAME }} را ببینید و انتخابی پیدا کنید که به شما می‌آید.</p>
+      <div class="hero-actions">
+        <a class="btn-primary btn-lg" href="{% url 'store:product_list' %}">کشف مجموعه</a>
+        <a class="btn-outline" href="{% url 'store:product_list' %}?sort=newest">تازه رسیده‌ها</a>
+      </div>
+    </div>
+    {% if hero_image %}
+      <div class="collection-caption"><a href="{% url 'store:product_detail' hero_image.product.slug %}"><span><small>در این مجموعه</small>{{ hero_image.product.name }}</span>{% include 'partials/icon.html' with kind='arrow' %}</a></div>
+    {% endif %}
+  </section>
+  <div class="service-row">
+    <p>{% include 'partials/icon.html' with kind='shirt' %}انتخاب رنگ و سایز با موجودی مشخص</p>
+    <p>{% include 'partials/icon.html' with kind='check' %}جزئیات خرید و پرداخت در حساب شما</p>
+    <p>{% include 'partials/icon.html' with kind='truck' %}{% if FREE_SHIPPING_MIN_AMOUNT %}ارسال رایگان از {{ FREE_SHIPPING_MIN_AMOUNT|currency }}{% else %}هزینه ارسال: {{ SHIPPING_FEE|currency }}{% endif %}</p>
+  </div>
+  {% if categories %}
+    <section class="collection-section" aria-labelledby="categories-title">
+      <div class="section-head"><div><h2 class="section-title" id="categories-title">از کدام مجموعه شروع می‌کنید؟</h2><p class="section-note">لباس موردنظر را در دستهٔ خودش پیدا کنید.</p></div><a class="link-arrow" href="{% url 'store:categories' %}">همه دسته‌بندی‌ها</a></div>
+      {% include 'partials/category_directory.html' %}
+    </section>
+  {% endif %}
+  {% if featured %}
+    <section class="collection-section" aria-labelledby="featured-title">
+      <div class="section-head"><div><h2 class="section-title" id="featured-title">انتخاب‌های فروشگاه</h2><p class="section-note">نگاهی نزدیک‌تر به محصولات منتخب {{ STORE_NAME }}</p></div><a class="link-arrow" href="{% url 'store:product_list' %}">دیدن همه محصولات</a></div>
+      <div class="product-grid">{% for product in featured %}{% include 'partials/product_card.html' %}{% endfor %}</div>
+    </section>
+  {% endif %}
+  {% if new_arrivals %}
+    <section class="collection-section" aria-labelledby="new-title">
+      <div class="section-head"><div><h2 class="section-title" id="new-title">تازه رسیده</h2><p class="section-note">جدیدترین انتخاب‌ها را مرور کنید.</p></div><div class="collection-actions"><a class="link-arrow" href="{% url 'store:product_list' %}?sort=newest">همه تازه‌ها</a><span class="rail-controls" hidden data-rail-controls><button class="btn-outline btn-icon" type="button" data-rail-step="-1" data-rail-target="new-products" aria-label="محصولات قبلی">{% include 'partials/icon.html' with kind='arrow' %}</button><button class="btn-outline btn-icon" type="button" data-rail-step="1" data-rail-target="new-products" aria-label="محصولات بعدی">{% include 'partials/icon.html' with kind='arrow' %}</button></span></div></div>
+      <div class="product-rail" id="new-products" tabindex="0" role="region" aria-label="تازه رسیده‌ها؛ برای دیدن محصولات بیشتر پیمایش کنید">{% for product in new_arrivals %}{% include 'partials/product_card.html' %}{% endfor %}</div>
+    </section>
+  {% endif %}
+  {% if discounted %}
+    <section class="collection-section" aria-labelledby="sale-title">
+      <div class="sale-showcase">
+        <div class="sale-copy"><span>{% include 'partials/icon.html' with kind='tag' %}</span><h2 id="sale-title">همان انتخاب،<br>با قیمت تازه.</h2><p>قیمت پیش از تخفیف، قیمت فعلی و میزان صرفه‌جویی را کنار هم ببینید.</p><a class="btn-outline" href="{% url 'store:product_list' %}?discount_only=on">همه تخفیف‌ها</a></div>
+        <div class="product-rail" tabindex="0" role="region" aria-label="محصولات تخفیف‌دار">{% for product in discounted %}{% include 'partials/product_card.html' %}{% endfor %}</div>
+      </div>
+    </section>
+  {% endif %}
+  {% if not new_arrivals and not featured and not discounted %}
+    <section class="empty-state mt-8">{% include 'partials/icon.html' with kind='shirt' %}<h2 class="text-xl">هنوز محصولی در فروشگاه منتشر نشده است</h2><p>پس از انتشار محصولات، قیمت و موجودی آن‌ها در این بخش نمایش داده می‌شود.</p><a class="btn-outline" href="{% url 'store:categories' %}">بررسی دسته‌بندی‌ها</a></section>
+  {% endif %}
+</div>
+{% endblock %}

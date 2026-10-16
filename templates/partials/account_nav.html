@@ -1,0 +1,8 @@
+<nav class="account-nav" aria-label="حساب کاربری">
+  <p>حساب شما</p>
+  <a class="chip" href="{% url 'accounts:profile' %}" {% if request.resolver_match.url_name == 'profile' %}aria-current="page"{% endif %}>{% include 'partials/icon.html' %} اطلاعات حساب</a>
+  <a class="chip" href="{% url 'orders:list' %}" {% if request.resolver_match.namespace == 'orders' %}aria-current="page"{% endif %}>{% include 'partials/icon.html' with kind='bag' %} سفارش‌ها</a>
+  <a class="chip" href="{% url 'accounts:address_list' %}" {% if 'address' in request.resolver_match.url_name %}aria-current="page"{% endif %}>{% include 'partials/icon.html' with kind='pin' %} آدرس‌ها</a>
+  <a class="chip" href="{% url 'accounts:profile_edit' %}" {% if request.resolver_match.url_name == 'profile_edit' %}aria-current="page"{% endif %}>{% include 'partials/icon.html' with kind='edit' %} ویرایش اطلاعات</a>
+  <form method="post" action="{% url 'accounts:logout' %}">{% csrf_token %}<button class="chip text-sale" type="submit">{% include 'partials/icon.html' with kind='logout' %} خروج از حساب</button></form>
+</nav>

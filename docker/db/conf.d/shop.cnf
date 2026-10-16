@@ -1,0 +1,31 @@
+# =====================================================================
+#  پیکربندی MariaDB برای فروشگاه
+#  توسط docker-compose.yml از مسیر docker/db/conf.d مونت می‌شود.
+# =====================================================================
+
+[mysqld]
+# کاراکترهای فارسی و ایموجی باید درست ذخیره شوند
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci
+
+# برای جلوگیری از Overselling، سطح ایزولاسیون Read Committed توصیه می‌شود:
+# قفل ردیف کار می‌کند و در عین حال Phantom Read کمتری دارد.
+transaction-isolation = READ-COMMITTED
+
+# حداکثر زمان انتظار برای قفل ردیف (ثانیه).
+# اگر یک تراکنش خیلی طول بکشد، درخواست دوم با خطا مواجه می‌شود
+# به‌جای اینکه بی‌نهایت منتظر بماند.
+innodb_lock_wait_timeout = 10
+
+# سایز بافر InnoDB (برای سرورهای کوچک/متوسط مناسب)
+innodb_buffer_pool_size = 256M
+innodb_log_file_size = 64M
+
+# محدودیت اتصال‌های هم‌زمان
+max_connections = 100
+
+[client]
+default-character-set = utf8mb4
+
+[mysql]
+default-character-set = utf8mb4

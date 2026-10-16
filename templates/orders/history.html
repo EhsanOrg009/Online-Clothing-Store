@@ -1,0 +1,23 @@
+{% extends 'orders/order_list.html' %}
+{% load shop_extras %}
+{% block content %}
+<div class="container-page py-8 account-layout">{% include 'partials/account_nav.html' %}<div class="account-content">
+<header class="page-heading section-head">
+<div>
+<h1 class="section-title">سفارش‌های من</h1><p class="mt-3 text-sm text-muted">جزئیات خرید، پرداخت و مسیر تحویل سفارش‌ها</p>
+</div><a class="btn-outline" href="{% url 'store:product_list' %}">ادامه خرید</a>
+</header>{% if page_obj.object_list %}<div class="flex flex-col gap-4">{% for order in page_obj %}<article class="card order-record p-6 sm:p-8">
+<div class="flex flex-wrap items-start justify-between gap-4">
+<div><a class="font-bold text-accent" href="{% url 'orders:detail' order.order_number %}"><bdi dir="ltr">{{ order.order_number }}</bdi></a><p class="mt-2 text-xs text-muted">{% jalali_datetime order.created_at %} · {{ order.items.count }} قلم</p>
+</div><strong>{{ order.total|currency }}</strong>
+</div>
+<div class="mt-4 flex flex-wrap items-center gap-3">{% include 'partials/status_badge.html' with kind='order' status=order.status %}{% include 'partials/status_badge.html' with kind='payment' status=order.payment_status %}</div>
+<div class="mt-4 flex flex-wrap justify-between gap-3 border-t border-line pt-4"><p class="text-sm text-muted">{{ order.receiver_name }} · {{ order.city }}</p>
+<div class="flex flex-wrap gap-2"><a class="btn-outline btn-sm" href="{% url 'orders:detail' order.order_number %}">جزئیات و پیگیری</a>{% if order.can_pay %}<form method="post" action="{% url 'orders:pay' order.order_number %}">{% csrf_token %}<button class="btn-primary btn-sm" type="submit">پرداخت سفارش</button>
+</form>{% endif %}</div>
+</div>
+</article>{% endfor %}</div>{% include 'partials/pagination_v2.html' %}{% else %}<div class="empty-state"><span class="result-symbol">{% include 'partials/icon.html' with kind='bag' %}</span>
+<h2 class="text-xl">هنوز سفارشی ثبت نکرده‌اید</h2><p>پس از ثبت اولین خرید، وضعیت آن را اینجا دنبال کنید.</p><a class="btn-primary" href="{% url 'store:product_list' %}">مشاهده محصولات</a>
+</div>{% endif %}</div>
+</div>
+{% endblock %}

@@ -1,0 +1,43 @@
+{% load shop_extras %}
+<div class="container-page py-8">
+  <nav class="breadcrumbs" aria-label="مسیر صفحه">
+    <ol>
+      <li><a href="{% url 'store:home' %}">خانه</a></li><li aria-hidden="true">/</li>
+      <li><a href="{% url 'store:product_list' %}">فروشگاه</a></li>
+      {% if category %}<li aria-hidden="true">/</li><li aria-current="page">{{ category.name }}</li>
+      {% elif is_search %}<li aria-hidden="true">/</li><li aria-current="page">جستجو</li>{% endif %}
+    </ol>
+  </nav>
+  <header class="page-heading">
+    <h1 class="section-title">{% if is_search %}{% if query %}نتایج جستجو برای «{{ query }}»{% else %}جستجوی محصولات{% endif %}{% else %}{{ category.name|default:'همه محصولات' }}{% endif %}</h1>
+    {% if category.description %}<p class="mt-3 max-w-2xl text-muted">{{ category.description }}</p>{% else %}<p class="section-note">رنگ و سایز دلخواهتان را پیدا کنید؛ قیمت و موجودی را پیش از خرید ببینید.</p>{% endif %}
+  </header>
+  <div class="catalog-layout">
+    <details class="catalog-filters" open data-catalog-filters>
+      <summary>{% include 'partials/icon.html' with kind='filter' %} جستجو و فیلتر محصولات</summary>
+      {% include 'partials/filter_form.html' %}
+    </details>
+    <section aria-label="نتایج محصولات">
+      <div class="catalog-toolbar">
+        <p class="text-sm text-muted">{{ result_count|fa_num }} محصول</p>
+        <form class="sort-form" method="get">
+          {% for key, values in request.GET.lists %}{% if key != 'sort' and key != 'page' %}{% for value in values %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}{% endif %}{% endfor %}
+          <label for="id_sort">مرتب‌سازی</label>{{ filter_form.sort }}
+          <button type="submit" class="btn-outline btn-sm">اعمال</button>
+        </form>
+      </div>
+      {% if page_obj.object_list %}
+        <h2 class="sr-only">فهرست محصولات</h2>
+        <div class="product-grid">{% for product in page_obj %}{% include 'partials/product_card.html' %}{% endfor %}</div>
+        {% include 'partials/pagination_v2.html' %}
+      {% else %}
+        <div class="empty-state">
+          <span class="result-symbol">{% include 'partials/icon.html' with kind='search' %}</span>
+          <h2 class="text-xl">{% if is_search %}نتیجه‌ای پیدا نشد{% else %}محصولی با این مشخصات پیدا نشد{% endif %}</h2>
+          <p>عبارت جستجو یا فیلترهای رنگ، سایز و قیمت را تغییر دهید.</p>
+          <a class="btn-primary" href="{% url 'store:product_list' %}">مشاهده همه محصولات</a>
+        </div>
+      {% endif %}
+    </section>
+  </div>
+</div>

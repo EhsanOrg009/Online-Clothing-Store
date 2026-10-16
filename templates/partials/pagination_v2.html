@@ -1,0 +1,20 @@
+{% load shop_extras %}
+{% if page_obj.paginator.num_pages > 1 %}
+<nav class="pagination mt-10" aria-label="صفحه‌بندی">
+  {% if page_obj.has_previous %}<a href="{% querystring page=page_obj.previous_page_number %}" class="btn-outline btn-sm" rel="prev">قبلی</a>{% endif %}
+  <ul>
+    {% for num in page_obj.paginator.page_range %}
+      <li>
+        {% if page_obj.number == num %}
+          <span class="pagination-number is-current" aria-current="page">{{ num|fa_num }}</span>
+        {% elif num == 1 or num == page_obj.paginator.num_pages or num >= page_obj.number|add:'-2' and num <= page_obj.number|add:'2' %}
+          <a href="{% querystring page=num %}" class="pagination-number" aria-label="صفحه {{ num|fa_num }}">{{ num|fa_num }}</a>
+        {% elif num == page_obj.number|add:'-3' or num == page_obj.number|add:'3' %}
+          <span class="px-1 text-muted" aria-hidden="true">…</span>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+  {% if page_obj.has_next %}<a href="{% querystring page=page_obj.next_page_number %}" class="btn-outline btn-sm" rel="next">بعدی</a>{% endif %}
+</nav>
+{% endif %}

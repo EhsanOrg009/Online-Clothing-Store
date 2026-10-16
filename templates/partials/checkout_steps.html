@@ -1,0 +1,38 @@
+{# نوار مراحل Checkout — ورودی: step (1 یا 2) #}
+<nav class="glass rounded-2xl p-4 sm:p-5" aria-label="مراحل خرید">
+  <ol class="flex w-full items-center gap-2 sm:gap-3">
+    <li class="flex min-w-0 items-center gap-2.5">
+      <span class="step-dot {% if step >= 2 %}is-done{% elif step == 1 %}is-current{% else %}is-todo{% endif %}"
+            {% if step == 1 %}aria-current="step"{% endif %}>
+        {% if step >= 2 %}
+          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2.5" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 5 5 10-10.5"/>
+          </svg>
+        {% else %}۱{% endif %}
+      </span>
+      <span class="truncate text-sm {% if step >= 1 %}font-bold text-ink{% else %}text-muted{% endif %}">
+        آدرس تحویل
+      </span>
+    </li>
+
+    <li class="relative h-0.5 min-w-4 flex-1 overflow-hidden rounded-full bg-line sm:min-w-10" aria-hidden="true">
+      {% if step >= 2 %}<span class="absolute inset-0 bg-gradient-to-l from-gold to-accent"></span>{% endif %}
+    </li>
+
+    <li class="flex min-w-0 items-center gap-2.5">
+      <span class="step-dot {% if step == 2 %}is-current{% else %}is-todo{% endif %}"
+            {% if step == 2 %}aria-current="step"{% endif %}>۲</span>
+      <span class="truncate text-sm {% if step == 2 %}font-bold text-ink{% else %}text-muted{% endif %}">
+        بررسی و پرداخت
+      </span>
+    </li>
+
+    <li class="relative h-0.5 min-w-4 flex-1 rounded-full bg-line sm:min-w-10" aria-hidden="true"></li>
+
+    <li class="flex min-w-0 items-center gap-2.5">
+      <span class="step-dot is-todo">۳</span>
+      <span class="truncate text-sm text-muted">پرداخت</span>
+    </li>
+  </ol>
+</nav>

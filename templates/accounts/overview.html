@@ -1,0 +1,18 @@
+{% extends 'accounts/profile.html' %}
+{% load shop_extras %}
+{% block content %}
+<div class="container-page py-8 account-layout">
+  {% include 'partials/account_nav.html' %}
+  <div class="account-content">
+    <header class="page-heading section-head">
+      <div class="account-card"><span class="account-avatar">{% include 'partials/icon.html' %}</span><div><h1 class="section-title">{{ profile_user.full_name|default:'حساب کاربری شما' }}</h1><p class="section-note">اطلاعات حساب، سفارش‌ها و آدرس‌های تحویل</p></div></div>
+      <a class="btn-outline" href="{% url 'accounts:profile_edit' %}">ویرایش اطلاعات</a>
+    </header>
+    <div class="grid gap-6 xl:grid-cols-2">
+      <section class="card p-6"><h2 class="text-lg">اطلاعات حساب</h2><dl class="mt-4"><div class="spec-row"><dt>نام و نام خانوادگی</dt><dd>{{ profile_user.full_name|default:'هنوز ثبت نشده' }}</dd></div><div class="spec-row"><dt>شماره موبایل</dt><dd><bdi dir="ltr">{{ profile_user.phone_number }}</bdi></dd></div><div class="spec-row"><dt>تاریخ عضویت</dt><dd>{% jalali_date profile_user.date_joined %}</dd></div></dl></section>
+      <section class="card p-6"><h2 class="text-lg">سفارش‌های شما</h2><p class="my-6 text-3xl font-bold text-accent">{{ orders_count|fa_num }} سفارش</p><p class="mb-6 text-sm text-muted">وضعیت پرداخت، آماده‌سازی و کد رهگیری در جزئیات هر سفارش نمایش داده می‌شود.</p><a class="btn-primary" href="{% url 'orders:list' %}">مشاهده سفارش‌ها</a></section>
+    </div>
+    <section class="mt-8"><div class="section-head"><h2 class="text-xl">آدرس‌های تحویل</h2><a class="btn-outline" href="{% url 'accounts:address_create' %}">افزودن آدرس</a></div>{% include 'partials/address_entries.html' %}</section>
+  </div>
+</div>
+{% endblock %}

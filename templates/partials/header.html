@@ -1,0 +1,43 @@
+{% load shop_extras %}
+<header class="shop-header">
+  <div class="service-strip">
+    <div class="container-page">
+      <p class="shipping-note">{% if FREE_SHIPPING_MIN_AMOUNT %}ارسال رایگان برای خرید از {{ FREE_SHIPPING_MIN_AMOUNT|currency }}{% else %}هزینه ارسال سفارش: {{ SHIPPING_FEE|currency }}{% endif %}</p>
+      <a href="tel:{{ STORE_PHONE }}">{% include 'partials/icon.html' with kind='phone' %} پشتیبانی <bdi dir="ltr">{{ STORE_PHONE }}</bdi></a>
+    </div>
+  </div>
+  <div class="container-page header-row">
+    <a href="{% url 'store:home' %}" class="wordmark">
+      <span class="brand-symbol">{% include 'partials/icon.html' with kind='shirt' %}</span>
+      <span>{{ STORE_NAME }}<small>انتخابی برای پوشیدن</small></span>
+    </a>
+    <form action="{% url 'store:search' %}" method="get" role="search" class="header-search">
+      <label for="header-search" class="sr-only">جستجوی محصول</label>
+      <input id="header-search" name="q" type="search" maxlength="100" value="{{ request.GET.q }}" class="field-input" placeholder="چه لباسی جست‌وجو می‌کنید؟">
+      <button type="submit" aria-label="جستجو">{% include 'partials/icon.html' with kind='search' %}</button>
+      <kbd class="search-key" dir="ltr" hidden data-search-shortcut>Ctrl K</kbd>
+    </form>
+    <div class="header-actions">
+      <a href="{% if user.is_authenticated %}{% url 'accounts:profile' %}{% else %}{% url 'accounts:login' %}{% endif %}" class="btn-ghost">
+        {% include 'partials/icon.html' %}<span>{% if user.is_authenticated %}حساب من{% else %}ورود{% endif %}</span>
+      </a>
+      <a href="{% url 'cart:detail' %}" class="btn-outline" aria-label="سبد خرید">
+        {% include 'partials/icon.html' with kind='bag' %}<span class="cart-count" data-cart-count>{{ cart_items_count }}</span>
+      </a>
+    </div>
+  </div>
+  <nav class="site-nav desktop-nav" aria-label="خرید">
+    <div class="container-page">
+      {% include 'partials/shop_links.html' %}
+      <a class="nav-service" href="{% url 'orders:list' %}">{% include 'partials/icon.html' with kind='truck' %} پیگیری سفارش</a>
+    </div>
+  </nav>
+  <details class="mobile-menu container-page">
+    <summary><span>{% include 'partials/icon.html' with kind='menu' %} منوی فروشگاه</span>{% include 'partials/icon.html' with kind='chevron' %}</summary>
+    <nav aria-label="منوی موبایل">
+      {% include 'partials/shop_links.html' %}
+      <a class="chip" href="{% url 'orders:list' %}">{% include 'partials/icon.html' with kind='truck' %} سفارش‌های من</a>
+      <a class="chip" href="{% url 'accounts:address_list' %}">{% include 'partials/icon.html' with kind='pin' %} آدرس‌های من</a>
+    </nav>
+  </details>
+</header>

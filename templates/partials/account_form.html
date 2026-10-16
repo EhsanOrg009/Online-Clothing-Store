@@ -1,0 +1,16 @@
+<div class="container-page py-8">
+  <div {% if user.is_authenticated %}class="account-layout"{% endif %}>
+    {% if user.is_authenticated %}{% include 'partials/account_nav.html' %}{% endif %}
+    <div class="account-content">
+      <section class="card max-w-2xl p-6 sm:p-8">
+        <span class="result-symbol">{% include 'partials/icon.html' with kind='edit' %}</span>
+        <h1 class="section-title">{{ form_title }}</h1>
+        <p class="mb-8 mt-3 text-sm text-muted">{{ form_description }}</p>
+        <form method="post" class="flex flex-col gap-6">
+          {% csrf_token %}{% include 'partials/accessible_fields.html' %}
+          <div class="flex flex-wrap gap-3"><button class="btn-primary" type="submit">{{ button_text|default:'ذخیره تغییرات' }}</button><a class="btn-outline" href="{% url 'accounts:profile' %}">بازگشت به حساب</a></div>
+        </form>
+      </section>
+    </div>
+  </div>
+</div>

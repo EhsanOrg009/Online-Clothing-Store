@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block title %}تکمیل پروفایل | {{ STORE_NAME }}{% endblock %}
+
+{% block content %}
+<div class="surface-soft">
+  <div class="container-page flex min-h-[70vh] items-center justify-center py-10 sm:py-14">
+    <div class="w-full max-w-xl">
+      <div class="card card-pad shadow-card">
+        <div class="mb-6 flex items-start gap-4">
+          <span class="icon-circle-accent h-12 w-12" aria-hidden="true">
+            <svg class="h-6 w-6" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.6" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M18 7.5v3.75a3 3 0 0 1-3 3h-4.5a3 3 0 0 1-3-3V7.5m12 0V6a2.25 2.25 0 0 0-2.25-2.25H8.25A2.25 2.25 0 0 0 6 6v1.5m12 0H6m12 0v.375"/>
+              <circle cx="12" cy="10.5" r="2.25"/>
+              <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M4.5 20.25a5.25 5.25 0 0 1 3-4.5m12 4.5a5.25 5.25 0 0 0-3-4.5"/>
+            </svg>
+          </span>
+          <div class="min-w-0">
+            <span class="badge-accent">مرحله آخر</span>
+            <h1 class="mt-2 text-xl font-semibold">تکمیل اطلاعات حساب</h1>
+            <p class="mt-2 text-sm leading-7 text-muted">
+              برای ثبت سفارش به اطلاعات زیر نیاز داریم. شماره موبایل شما تأیید شده است.
+            </p>
+          </div>
+        </div>
+
+        <div class="divider mb-5"></div>
+
+        <form method="post" action="{% url 'accounts:complete_profile' %}" class="flex flex-col gap-4">
+          {% csrf_token %}
+          {% include "partials/form_fields.html" with form=form %}
+
+          <p class="alert alert-info mt-1">
+            <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" aria-hidden="true">
+              <circle cx="12" cy="12" r="9"/>
+              <path stroke-linecap="round" d="M12 11.25v5M12 7.75h.008"/>
+            </svg>
+            اطلاعات آدرس شما فقط برای ارسال سفارش استفاده می‌شود و در اختیار هیچ ثالثی قرار نمی‌گیرد.
+          </p>
+
+          <button type="submit" class="btn-primary btn-lg btn-block mt-1">ذخیره اطلاعات</button>
+        </form>
+      </div>
+
+      <p class="mt-5 text-center text-xs text-muted">
+        <a href="{% url 'store:home' %}" class="transition-colors hover:text-ink">بازگشت به فروشگاه</a>
+      </p>
+    </div>
+  </div>
+</div>
+{% endblock %}

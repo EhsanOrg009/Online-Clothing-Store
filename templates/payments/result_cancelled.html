@@ -1,0 +1,3 @@
+{% extends 'base.html' %}
+{% block title %}پرداخت لغو شد | {{ STORE_NAME }}{% endblock %}
+{% block content %}{% include 'partials/payment_result.html' with result='cancelled' %}{% endblock %}

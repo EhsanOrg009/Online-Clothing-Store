@@ -1,0 +1,131 @@
+# =====================================================================
+#  فروشگاه اینترنتی پوشاک — Docker Compose (Production / استقرار)
+#
+#  اجرا:
+#      docker compose up -d --build
+#
+#  برای توسعه با Hot-Reload از `docker-compose.override.yml` استفاده کنید
+#  (به‌طور خودکار خوانده می‌شود):
+#      docker compose up -d
+#
+#  ⚠️ رمزها را هرگز در این فایل وارد نکنید؛ از `.env` کنار همین فایل
+#     یا از `docker compose` با متغیرهای محیطی استفاده کنید.
+# =====================================================================
+
+name: clothing-shop
+
+x-app-env: &app-env
+  # اتصال به کانتینر دیتابیس (نام سرویس = نام میزبان در شبکه compose)
+  DATABASE_HOST: db
+  DATABASE_PORT: "3306"
+  # برای استقرار Production در فایل اصلی قاطع تعریف شده تا مقدار
+  # `DJANGO_SETTINGS_MODULE` داخل `.env` محلی به آن نشت نکند.
+  # (نسخه‌ی توسعه در docker-compose.override.yml روی development تنظیم شده است)
+  DJANGO_SETTINGS_MODULE: config.settings.production
+  SECRET_KEY: ${SECRET_KEY:?کلید SECRET_KEY تنظیم نشده است}
+  PAYMENT_SECRET: ${PAYMENT_SECRET:?کلید PAYMENT_SECRET تنظیم نشده است}
+  ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1}
+  CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+  TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-}
+  DATABASE_NAME: ${DATABASE_NAME:-clothing_shop}
+  DATABASE_USER: ${DATABASE_USER:-shop}
+  DATABASE_PASSWORD: ${DATABASE_PASSWORD:?رمز دیتابیس تنظیم نشده است}
+  STORE_NAME: ${STORE_NAME:-پوشاک لوکس}
+  STORE_PHONE: ${STORE_PHONE:-021-91001234}
+  STORE_EMAIL: ${STORE_EMAIL:-info@luxeclothing.ir}
+  STORE_ADDRESS: ${STORE_ADDRESS:-تهران}
+  SMS_PROVIDER: ${SMS_PROVIDER:-console}
+  PAYMENT_GATEWAY: ${PAYMENT_GATEWAY:-mock}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  # تنظیمات امنیتی؛ در استقرار بدون Reverse-Proxy آن‌ها را False کنید
+  SECURE_SSL_REDIRECT: ${SECURE_SSL_REDIRECT:-True}
+  SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-True}
+  CSRF_COOKIE_SECURE: ${CSRF_COOKIE_SECURE:-True}
+  SECURE_HSTS_SECONDS: ${SECURE_HSTS_SECONDS:-31536000}
+
+services:
+  # -------------------------------------------------------------------
+  # دیتابیس — MariaDB 11.4 (سازگار با MySQL 8)
+  # -------------------------------------------------------------------
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --transaction-isolation=READ-COMMITTED
+      # برای جلوگیری از Overselling، قفل ردیف باید قابل اعتماد باشد
+      - --innodb-lock-wait-timeout=10
+    environment:
+      MARIADB_DATABASE: ${DATABASE_NAME:-clothing_shop}
+      MARIADB_USER: ${DATABASE_USER:-shop}
+      MARIADB_PASSWORD: ${DATABASE_PASSWORD:?رمز دیتابیس تنظیم نشده است}
+      # فقط برای ساخت اولیه؛ رمز root را حتماً عوض کنید
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-change-the-root-password}
+      # بارگذاری جدول‌های Timezone (لازم برای date_hierarchy در ادمین)
+      MARIADB_AUTO_UPGRADE: "1"
+    volumes:
+      - db-data:/var/lib/mysql
+      # اسکریپت‌هایی که فقط هنگام ساخت اولیه اجرا می‌شوند
+      - ./docker/db/init:/docker-entrypoint-initdb.d:ro
+      - ./docker/db/conf.d:/etc/mysql/conf.d:ro
+    networks:
+      - shop-net
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  # -------------------------------------------------------------------
+  # وب — Django + Gunicorn
+  # -------------------------------------------------------------------
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?رمز دیتابیس تنظیم نشده است}
+    volumes:
+      # آپلود تصاویر باید بین ری‌استارت‌ها باقی بماند
+      - media-data:/app/media
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - shop-net
+
+  # -------------------------------------------------------------------
+  # phpMyAdmin (اختیاری — فقط برای توسعه؛ با PROFILE=tools فعال می‌شود)
+  # -------------------------------------------------------------------
+  phpmyadmin:
+    image: phpmyadmin:5
+    restart: unless-stopped
+    profiles: ["tools"]
+    environment:
+      PMA_HOST: db
+      PMA_PORT: "3306"
+      PMA_ABSOLUTE_URI: ${PMA_URI:-http://localhost:8080/}
+      UPLOAD_LIMIT: 64M
+      # فقط یک دیتابیس نمایش داده شود
+      PMA_ONLYDB: ${DATABASE_NAME:-clothing_shop}
+    ports:
+      - "${PMA_PORT:-8080}:80"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - shop-net
+
+networks:
+  shop-net:
+    driver: bridge
+
+volumes:
+  db-data:
+  media-data:

@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% load shop_extras %}
+{% block title %}انتقال به درگاه | {{ STORE_NAME }}
+{% endblock %}
+{% block extra_head %}<meta http-equiv="refresh" content="1; url={{ redirect_url }}">
+{% endblock %}
+{% block content %}
+<div class="container-page py-12">
+<section class="card result-panel mx-auto max-w-xl p-6 sm:p-10"><span class="result-symbol">{% include 'partials/icon.html' with kind='clock' %}</span>
+<h1 class="section-title">در حال انتقال به درگاه پرداخت</h1><p class="my-5 text-sm text-muted" role="status">برای پرداخت سفارش به درگاه منتقل می‌شوید. اگر انتقال انجام نشد، دکمه زیر را انتخاب کنید.</p>
+<dl>
+<div class="spec-row"><dt>شماره سفارش</dt><dd><bdi dir="ltr">{{ payment.order.order_number }}</bdi></dd>
+</div>
+<div class="spec-row"><dt>مبلغ پرداخت</dt><dd>{{ payment.amount|currency }}</dd>
+</div>
+</dl>
+<div class="mt-6 flex flex-wrap gap-3"><a class="btn-primary" href="{{ redirect_url }}">ورود به درگاه</a><a class="btn-outline" href="{% url 'orders:detail' payment.order.order_number %}">بازگشت به سفارش</a>
+</div>
+</section>
+</div>
+{% endblock %}

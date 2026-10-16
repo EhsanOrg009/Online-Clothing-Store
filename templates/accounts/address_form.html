@@ -1,0 +1,3 @@
+{% extends 'base.html' %}
+{% block title %}{{ title }} | {{ STORE_NAME }}{% endblock %}
+{% block content %}{% include 'partials/account_form.html' with form_title=title form_description='نام گیرنده، تلفن و نشانی دقیق تحویل را وارد کنید.' button_text='ذخیره آدرس' %}{% endblock %}

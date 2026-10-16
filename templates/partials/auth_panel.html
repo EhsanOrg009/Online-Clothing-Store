@@ -1,0 +1,27 @@
+<div class="container-page py-10 sm:py-16">
+  <div class="auth-layout">
+    <aside class="auth-story" aria-label="حساب فروشگاه">
+      <p class="text-lg font-semibold">{{ STORE_NAME }}</p>
+      <div><h2>{% if verifying %}یک قدم تا<br>حساب شما{% else %}همهٔ خریدها،<br>در حساب شما.{% endif %}</h2><p class="mt-6 leading-8">آدرس‌های تحویل را ذخیره کنید و سفارش‌ها و وضعیت پرداخت را در یک محل ببینید.</p></div>
+      {% include 'partials/icon.html' with kind='shirt' %}
+    </aside>
+    <section class="auth-form">
+      <span class="result-symbol">{% include 'partials/icon.html' %}</span>
+      <h1>{% if verifying %}کد تأیید را وارد کنید{% else %}ورود / ثبت‌نام{% endif %}</h1>
+      <p class="mb-8 mt-3 text-sm leading-7 text-muted">{% if verifying %}کد ارسال‌شده به <bdi dir="ltr">{{ phone }}</bdi> را وارد کنید.{% else %}شماره موبایل خود را وارد کنید تا کد ورود برای شما ارسال شود. برای شماره جدید، حساب پس از تأیید ایجاد می‌شود.{% endif %}</p>
+      <form method="post" class="flex flex-col gap-6">
+        {% csrf_token %}{% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+        {% include 'partials/accessible_fields.html' %}
+        <button type="submit" class="btn-primary btn-lg">{% if verifying %}تأیید و ورود{% else %}ارسال کد تأیید{% endif %}</button>
+      </form>
+      {% if verifying %}
+        <div class="mt-6 flex flex-wrap items-center gap-3">
+          <a class="btn-outline" href="{% url 'accounts:login' %}">ویرایش شماره</a>
+          <form method="post" action="{% url 'accounts:resend' %}">{% csrf_token %}<button type="submit" class="btn-ghost">ارسال دوباره کد</button></form>
+        </div>
+        <p class="mt-5 text-xs leading-7 text-muted">کد ورود را در اختیار دیگران قرار ندهید. برای کد منقضی‌شده، درخواست ارسال دوباره بدهید.</p>
+      {% endif %}
+      <a class="link-arrow mt-8 inline-block" href="{% url 'store:product_list' %}">بازگشت به فروشگاه</a>
+    </section>
+  </div>
+</div>

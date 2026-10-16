@@ -1,0 +1,32 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---------- Environment ----------
+.env
+.env.*
+!.env.example
+
+# ---------- Django ----------
+*.log
+logs/
+db.sqlite3
+staticfiles/
+media/*
+!media/.gitkeep
+
+# ---------- Frontend build ----------
+node_modules/
+assets/css/*.built.css
+
+# ---------- Editors / OS ----------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ---------- MySQL (local dev server data) ----------
+.mysql-data/

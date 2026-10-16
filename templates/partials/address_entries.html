@@ -1,0 +1,18 @@
+{% if addresses %}
+  <div class="grid gap-4 xl:grid-cols-2">
+    {% for address in addresses %}
+      <article class="card p-6">
+        <div class="flex flex-wrap justify-between gap-3"><h2 class="flex items-center gap-2 text-base">{% include 'partials/icon.html' with kind='pin' %}{{ address.receiver_name }}</h2>{% if address.is_default %}<span class="badge-accent">پیش‌فرض</span>{% endif %}</div>
+        <p class="mt-4 text-sm leading-7 text-muted">{{ address.single_line }}</p>
+        <p class="mt-2 text-sm"><bdi dir="ltr">{{ address.receiver_phone }}</bdi></p>
+        <div class="mt-6 flex flex-wrap gap-2 border-t border-line pt-4">
+          <a class="btn-outline btn-sm" href="{% url 'accounts:address_update' address.pk %}">ویرایش آدرس</a>
+          {% if not address.is_default %}<form method="post" action="{% url 'accounts:address_set_default' address.pk %}">{% csrf_token %}<button class="btn-ghost btn-sm" type="submit">انتخاب به‌عنوان پیش‌فرض</button></form>{% endif %}
+          <form method="post" action="{% url 'accounts:address_delete' address.pk %}" data-confirm="آدرس {{ address.receiver_name }} حذف شود؟">{% csrf_token %}<button class="btn-ghost btn-sm text-sale" type="submit">حذف آدرس</button></form>
+        </div>
+      </article>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="empty-state"><span class="result-symbol">{% include 'partials/icon.html' with kind='pin' %}</span><h2 class="text-xl">هنوز آدرسی ثبت نکرده‌اید</h2><p>آدرس تحویل را ذخیره کنید تا هنگام خرید به‌آسانی انتخاب کنید.</p><a class="btn-primary" href="{% url 'accounts:address_create' %}">افزودن آدرس</a></div>
+{% endif %}

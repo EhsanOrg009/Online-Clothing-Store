@@ -1,0 +1,41 @@
+<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+{% if kind == 'search' %}
+  <circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/>
+{% elif kind == 'bag' %}
+  <path d="M5 7h14l1 14H4L5 7Z"/><path d="M8 8V6a4 4 0 0 1 8 0v2"/>
+{% elif kind == 'arrow' %}
+  <path d="m14 6-6 6 6 6M8 12h13"/>
+{% elif kind == 'menu' %}
+  <path d="M4 6h16M4 12h16M4 18h16"/>
+{% elif kind == 'chevron' %}
+  <path d="m6 9 6 6 6-6"/>
+{% elif kind == 'shirt' %}
+  <path d="m16 3 6 4-3 5-3-2v11H8V10l-3 2-3-5 6-4a4 4 0 0 0 8 0Z"/>
+{% elif kind == 'truck' %}
+  <path d="M1 4h13v13H1zM14 8h4l4 4v5h-8"/><circle cx="5" cy="18" r="2"/><circle cx="18" cy="18" r="2"/>
+{% elif kind == 'check' %}
+  <circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>
+{% elif kind == 'close' %}
+  <circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/>
+{% elif kind == 'tag' %}
+  <path d="M20 13 13 20a2 2 0 0 1-3 0L2 12V2h10l8 8a2 2 0 0 1 0 3Z"/><circle cx="7" cy="7" r="1"/>
+{% elif kind == 'grid' %}
+  <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+{% elif kind == 'filter' %}
+  <path d="M4 6h16M4 12h16M4 18h16M8 3v6M16 9v6M10 15v6"/>
+{% elif kind == 'pin' %}
+  <path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="3"/>
+{% elif kind == 'edit' %}
+  <path d="m16 3 5 5-12 12-6 1 1-6Z"/><path d="m14 5 5 5"/>
+{% elif kind == 'logout' %}
+  <path d="M9 4H4v16h5M9 12h12m-4-4 4 4-4 4"/>
+{% elif kind == 'phone' %}
+  <path d="M22 16.9v3a2 2 0 0 1-2.2 2A19.7 19.7 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7l.4 2.7a2 2 0 0 1-.6 1.7l-1.3 1.3a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 1.7-.6l2.7.4a2 2 0 0 1 1.7 2Z"/>
+{% elif kind == 'mail' %}
+  <rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 6 9 7 9-7"/>
+{% elif kind == 'clock' %}
+  <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+{% else %}
+  <circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>
+{% endif %}
+</svg>

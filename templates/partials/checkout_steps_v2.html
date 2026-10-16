@@ -1,0 +1,7 @@
+<nav class="checkout-progress" aria-label="مراحل خرید">
+  <ol>
+    <li {% if step == 1 %}aria-current="step"{% endif %}><span class="step-dot {% if step == 1 %}is-current{% else %}is-done{% endif %}">۱</span><span>آدرس تحویل</span></li>
+    <li {% if step == 2 %}aria-current="step"{% endif %}><span class="step-dot {% if step == 2 %}is-current{% else %}is-todo{% endif %}">۲</span><span>بررسی سفارش</span></li>
+    <li><span class="step-dot is-todo">۳</span><span>پرداخت در درگاه</span></li>
+  </ol>
+</nav>

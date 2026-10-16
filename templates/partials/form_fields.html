@@ -1,0 +1,73 @@
+{% load shop_extras %}
+{% comment %}
+  رندر امن فرم‌های Django با استایل‌های پروژه.
+  استفاده: {% include "partials/form_fields.html" with form=my_form %}
+
+  نکته دسترس‌پذیری: ویجت‌ها از سمت Python رندر می‌شوند و امکان تزریق attr از
+  قالب نیست؛ بنابراین `aria-invalid="true"` روی کانتینر فیلد قرار می‌گیرد و
+  با Alpine روی خودِ ورودی/سلکت/تکست‌آریا هم منتقل می‌شود.
+{% endcomment %}
+
+{% if form.non_field_errors %}
+  <div class="alert alert-error" role="alert">
+    <svg class="mt-0.5 h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.8" aria-hidden="true">
+      <circle cx="12" cy="12" r="9"/>
+      <path stroke-linecap="round" d="M12 7.5v5M12 16.25h.008"/>
+    </svg>
+    <ul class="flex flex-col gap-1">
+      {% for error in form.non_field_errors %}<li>{{ error }}</li>{% endfor %}
+    </ul>
+  </div>
+{% endif %}
+
+{% for field in form %}
+  {% if field.is_hidden %}
+    {{ field }}
+  {% else %}
+    {% with checkbox=field.widget|is_checkbox %}
+      {% if checkbox %}
+        <div class="flex items-start gap-3 rounded-lg border border-line bg-sand/50 px-4 py-3"
+             {% if field.errors %}aria-invalid="true"
+             x-init="$el.querySelectorAll('input, select, textarea').forEach(function (el) { el.setAttribute('aria-invalid', 'true'); })"{% endif %}>
+          {{ field }}
+          <div class="min-w-0 flex-1">
+            <label for="{{ field.id_for_label }}" class="block cursor-pointer text-sm text-ink-soft">
+              {{ field.label }}
+            </label>
+            {% if field.help_text %}<p class="field-hint mt-1">{{ field.help_text }}</p>{% endif %}
+            {% if field.errors %}
+              <div class="field-errors mt-1.5" role="alert">
+                {% for error in field.errors %}<span>{{ error }}</span>{% endfor %}
+              </div>
+            {% endif %}
+          </div>
+        </div>
+      {% else %}
+        <div class="field"
+             {% if field.errors %}aria-invalid="true"
+             x-init="$el.querySelectorAll('input, select, textarea').forEach(function (el) { el.setAttribute('aria-invalid', 'true'); })"{% endif %}>
+          <label class="field-label" for="{{ field.id_for_label }}">
+            {{ field.label }}
+            {% if field.field.required %}
+              <span class="text-sale" aria-hidden="true">*</span>
+              <span class="sr-only">(الزامی)</span>
+            {% endif %}
+          </label>
+
+          {{ field }}
+
+          {% if field.help_text %}
+            <p class="field-hint">{{ field.help_text }}</p>
+          {% endif %}
+
+          {% if field.errors %}
+            <div class="field-errors" role="alert">
+              {% for error in field.errors %}<span>{{ error }}</span>{% endfor %}
+            </div>
+          {% endif %}
+        </div>
+      {% endif %}
+    {% endwith %}
+  {% endif %}
+{% endfor %}

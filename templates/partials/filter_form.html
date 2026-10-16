@@ -1,0 +1,8 @@
+{% load shop_forms %}
+<form method="get" id="filter-form" class="flex flex-col gap-5">
+{% if category %}<input type="hidden" name="category" value="{{ category.slug }}">{% endif %}
+{% if request.GET.sort %}<input type="hidden" name="sort" value="{{ request.GET.sort }}">{% endif %}
+{% if filter_form.non_field_errors %}<div class="alert alert-error" role="alert">{{ filter_form.non_field_errors }}</div>{% endif %}
+{% for field in filter_form %}{% if field.name != 'sort' and field.name != 'category' %}{% include 'partials/accessible_field.html' %}{% endif %}{% endfor %}
+<button type="submit" class="btn-primary">اعمال فیلترها</button><a href="{{ request.path }}" class="btn-outline">پاک‌کردن فیلترها</a>
+</form>

@@ -1,0 +1,52 @@
+# =====================================================================
+#  فایل‌هایی که نباید وارد Image یا Build Context شوند
+# =====================================================================
+
+# ---------- محیط مجازی و ابزارها ----------
+.venv
+venv
+node_modules
+
+# ---------- Git و ابزارهای توسعه ----------
+.git
+.gitignore
+.idea
+.vscode
+*.swp
+.DS_Store
+
+# ---------- داده‌های حساس ----------
+# ⚠️ فایل‌های پیکربندی واقعی هرگز وارد Image نمی‌شوند؛ مقادیر از
+#    Environment (docker compose) تأمین می‌شوند.
+.env
+.env.*
+!.env.example
+
+# ---------- لاگ و خروجی‌ها ----------
+logs
+*.log
+staticfiles
+
+# ---------- داده‌های محلی ----------
+media/*
+!media/.gitkeep
+mysql-data
+.mysql-data
+
+# ---------- Docker (از ارجاع خودداری کنیم) ----------
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# ---------- فایل‌های ساخته‌شده که دوباره تولید می‌شوند ----------
+# static/ عمداً در Image کپی می‌شود (از مرحله assets)؛ ولی در Build
+# Context اصلی لازم نیست چون دوباره ساخته می‌شود.
+static/*
+# Generated CSS/fonts/vendor come from the assets stage; authored files must ship.
+!static/js
+!static/js/**
+!static/favicon.svg
+
+# ---------- مستندات ----------
+README.md
+PROJECT_ARCHITECTURE.md

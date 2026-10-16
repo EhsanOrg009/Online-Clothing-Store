@@ -1,0 +1,60 @@
+/* Fashion identity, shared by storefront and the native Django admin. */
+:root {
+  --shop-primary: #6D214F;
+  --shop-primary-hover: #54173B;
+  --shop-coral: #F26B5B;
+  --shop-background: #F7F7F8;
+  --shop-paper: #FFFFFF;
+  --shop-ink: #1D1B20;
+  --shop-ink-soft: #49454F;
+  --shop-muted: #73717A;
+  --shop-secondary-text: #68666F; /* AA body text on the main background. */
+  --shop-line: #E8E5EA;
+  --shop-sand: #F7F7F8;
+  --shop-accent: var(--shop-primary);
+  --shop-accent-dark: var(--shop-primary-hover);
+  --shop-accent-soft: #F6EDF3;
+  --shop-coral-soft: #FFF0ED;
+  --shop-sale: #D92D45;
+  --shop-danger-text: #BD2039;
+  --shop-success: #16805D;
+  --shop-success-text: #126E50;
+  --shop-warning: #B7791F;
+  --shop-warning-text: #80520F;
+  --shop-info: #2563EB;
+  --shop-success-soft: #EAF6F0;
+  --shop-warning-soft: #FFF5E5;
+  --shop-danger-soft: #FFF0F2;
+  --shop-info-soft: #EDF3FF;
+  --shop-gradient: linear-gradient(135deg, #6D214F 0%, #F26B5B 100%);
+  --shop-font: "Vazirmatn", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --shop-font-latin: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --shop-text-xs: 12px; --shop-text-sm: 14px; --shop-text-base: 16px;
+  --shop-text-lg: 18px; --shop-text-xl: 24px; --shop-text-2xl: 32px;
+  --shop-text-3xl: 40px; --shop-text-4xl: 48px;
+  --shop-space-1: 4px; --shop-space-2: 8px; --shop-space-3: 12px;
+  --shop-space-4: 16px; --shop-space-6: 24px; --shop-space-8: 32px;
+  --shop-space-10: 40px; --shop-space-12: 48px; --shop-space-16: 64px;
+  --shop-space-20: 80px; --shop-space-24: 96px;
+  --shop-radius-sm: 8px; --shop-radius-control: 12px;
+  --shop-radius: 16px; --shop-radius-feature: 24px;
+  --shop-container: 1440px;
+  --shop-shadow: 0 2px 4px rgb(29 27 32 / .02), 0 8px 24px rgb(109 33 79 / .06);
+  --shop-shadow-raised: 0 4px 8px rgb(29 27 32 / .04), 0 16px 40px rgb(109 33 79 / .10);
+  --shop-shadow-overlay: 0 8px 24px rgb(29 27 32 / .10), 0 24px 64px rgb(109 33 79 / .16);
+  --shop-fast: 150ms; --shop-motion: 220ms; --shop-slow: 320ms;
+  --shop-ease: cubic-bezier(.2,.8,.2,1);
+  color-scheme: light;
+}
+@font-face { font-family: Vazirmatn; font-weight: 400; font-display: swap; src: url('../fonts/Vazirmatn-Regular.woff2') format('woff2'); }
+@font-face { font-family: Vazirmatn; font-weight: 500; font-display: swap; src: url('../fonts/Vazirmatn-Medium.woff2') format('woff2'); }
+@font-face { font-family: Vazirmatn; font-weight: 600; font-display: swap; src: url('../fonts/Vazirmatn-SemiBold.woff2') format('woff2'); }
+@font-face { font-family: Vazirmatn; font-weight: 700; font-display: swap; src: url('../fonts/Vazirmatn-Bold.woff2') format('woff2'); }
+@font-face { font-family: Vazirmatn; font-weight: 800; font-display: swap; src: url('../fonts/Vazirmatn-ExtraBold.woff2') format('woff2'); }
+@font-face { font-family: Inter; font-weight: 100 900; font-display: swap; src: url('../fonts/InterVariable.woff2') format('woff2'); }
+:lang(en), bdi[dir=ltr], input[dir=ltr] { font-family: var(--shop-font-latin); }
+:focus-visible { outline: 3px solid var(--shop-primary); outline-offset: 3px; }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

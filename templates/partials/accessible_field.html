@@ -1,0 +1,20 @@
+{% load shop_forms %}
+{% if field.is_hidden %}
+  {{ field }}
+{% elif field|is_group %}
+  <fieldset class="field">
+    <legend class="field-label mb-2">{{ field.label }}</legend>
+    {% accessible_input field %}
+    {% include 'partials/field_feedback.html' %}
+  </fieldset>
+{% else %}
+  <div class="field">
+    {% if field|is_check %}
+      <label class="flex min-h-11 items-center gap-3" for="{{ field.id_for_label }}">{% accessible_input field %}{{ field.label }}</label>
+    {% else %}
+      <label class="field-label" for="{{ field.id_for_label }}">{{ field.label }}{% if field.field.required %}<span class="text-sale" aria-hidden="true"> *</span><span class="sr-only"> (الزامی)</span>{% endif %}</label>
+      {% accessible_input field %}
+    {% endif %}
+    {% include 'partials/field_feedback.html' %}
+  </div>
+{% endif %}

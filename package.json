@@ -1,0 +1,23 @@
+{
+  "name": "clothing-shop-assets",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ساخت فایل‌های CSS/JS مورد نیاز فروشگاه (Tailwind CSS + Alpine.js + HTMX + فونت وزیرمتن)",
+  "scripts": {
+    "build": "npm run build:css && npm run build:admin && npm run vendor",
+    "build:css": "tailwindcss -i ./assets/css/app.css -o ./static/css/app.css --minify",
+    "build:admin": "tailwindcss -i ./assets/css/admin.css -o ./static/css/admin.css --minify",
+    "watch": "tailwindcss -i ./assets/css/app.css -o ./static/css/app.css --watch",
+    "watch:admin": "tailwindcss -i ./assets/css/admin.css -o ./static/css/admin.css --watch",
+    "vendor": "node scripts/copy_vendor.js"
+  },
+  "devDependencies": {
+    "tailwindcss": "^4.1.0",
+    "@tailwindcss/cli": "^4.1.0"
+  },
+  "dependencies": {
+    "alpinejs": "^3.14.0",
+    "htmx.org": "^2.0.0",
+    "vazirmatn": "^33.0.0"
+  }
+}

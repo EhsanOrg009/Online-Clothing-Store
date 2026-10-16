@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}دسته‌بندی‌ها | {{ STORE_NAME }}{% endblock %}
+
+{% block content %}
+<div class="container-page py-10">
+  <nav class="mb-5 flex flex-wrap items-center gap-1.5 text-sm text-muted" aria-label="مسیر صفحه">
+    <a href="{% url 'store:home' %}" class="transition-colors hover:text-ink">خانه</a>
+    <span aria-hidden="true">/</span>
+    <span class="text-ink">دسته‌بندی‌ها</span>
+  </nav>
+
+  <header class="mb-8 flex flex-wrap items-end justify-between gap-3 border-b border-line pb-5">
+    <div>
+      <span class="eyebrow">خرید بر اساس سلیقه</span>
+      <h1 class="section-title mt-2">دسته‌بندی محصولات</h1>
+      <p class="mt-1.5 text-sm text-muted">دسته موردنظر خود را انتخاب کنید و خرید را شروع کنید.</p>
+    </div>
+    <a href="{% url 'store:product_list' %}" class="group inline-flex items-center gap-1.5 text-sm font-medium text-accent transition-colors hover:text-accent-dark">
+      مشاهده همه محصولات
+      <svg class="h-4 w-4 rtl:rotate-180 transition-transform group-hover:-translate-x-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5.25 20.25 12l-6.75 6.75M19.5 12H3.75"/>
+      </svg>
+    </a>
+  </header>
+
+  {% if categories %}
+    <div class="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+      {% for category in categories %}
+        <a href="{% url 'store:category' category.slug %}"
+           class="category-tile group aspect-[16/10]">
+          {% if category.image %}
+            <img src="{{ category.image.url }}" alt="تصویر دسته‌بندی {{ category.name }}"
+                 width="800" height="500" loading="lazy" decoding="async">
+          {% else %}
+            <span class="grid h-full w-full place-items-center bg-gradient-to-br from-ink via-ink-soft to-accent-dark text-paper/70">
+              <svg class="h-12 w-12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+                <rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/>
+                <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/>
+                <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/>
+                <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/>
+              </svg>
+            </span>
+          {% endif %}
+          <span class="category-tile__shade absolute inset-0" aria-hidden="true"></span>
+          <span class="badge-gold absolute end-4 top-4">{{ category.product_count }} محصول</span>
+          <span class="absolute inset-x-0 bottom-0 flex items-center justify-between gap-3 p-5">
+            <span class="min-w-0">
+              <span class="block truncate text-lg font-bold text-paper transition-colors">{{ category.name }}</span>
+              <span class="mt-0.5 block text-xs text-paper/70">مشاهدهٔ محصولات این دسته</span>
+            </span>
+            <span class="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-paper text-ink transition-all group-hover:bg-gold" aria-hidden="true">
+              <svg class="h-4 w-4 rtl:rotate-180" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5.25 20.25 12l-6.75 6.75M19.5 12H3.75"/>
+              </svg>
+            </span>
+          </span>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty-state">
+      <span class="icon-circle-accent h-14 w-14" aria-hidden="true">
+        <svg class="h-7 w-7" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+          <rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/>
+          <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/>
+          <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/>
+          <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/>
+        </svg>
+      </span>
+      <h2 class="text-lg font-semibold">هنوز دسته‌بندی‌ای ثبت نشده است</h2>
+      <p class="max-w-sm text-sm leading-7 text-muted">به‌زودی دسته‌بندی‌های تازه اضافه می‌شود.</p>
+      <a href="{% url 'store:product_list' %}" class="btn-primary mt-1">مشاهده محصولات</a>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

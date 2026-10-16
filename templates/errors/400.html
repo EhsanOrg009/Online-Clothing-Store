@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block title %}درخواست نامعتبر | {{ STORE_NAME }}
+{% endblock %}
+{% block content %}
+<div class="container-page py-12">
+<section class="error-panel mx-auto max-w-xl text-center"><p class="text-6xl font-bold text-accent">۴۰۰</p>
+<h1 class="section-title mt-5">{% if csrf_failure %}اعتبار فرم پایان یافته است{% else %}درخواست نامعتبر{% endif %}</h1><p class="my-6 text-sm leading-7 text-muted">{% if csrf_failure %}صفحه را دوباره باز کنید و فرم را ارسال کنید.{% else %}اطلاعات ارسال‌شده معتبر نیست. صفحه را دوباره باز کنید و فرم را بررسی کنید.{% endif %}</p>
+<div class="flex flex-wrap justify-center gap-3"><a class="btn-primary" href="{% url 'store:home' %}">صفحه اصلی</a><a class="btn-outline" href="{% url 'store:product_list' %}">مشاهده محصولات</a>
+</div>
+</section>
+</div>
+{% endblock %}

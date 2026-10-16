@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% load shop_extras %}
+
+{% block title %}سفارش {{ order.order_number }} | {{ STORE_NAME }}{% endblock %}
+
+{% block content %}
+<div class="container-page py-10">
+  <nav class="mb-6 text-sm text-muted" aria-label="مسیر صفحه">
+    <a href="{% url 'accounts:profile' %}" class="hover:text-ink">حساب کاربری</a>
+    <span class="mx-1.5">/</span>
+    <a href="{% url 'orders:list' %}" class="hover:text-ink">سفارش‌ها</a>
+    <span class="mx-1.5">/</span>
+    <span class="ltr inline-block text-ink" dir="ltr">{{ order.order_number }}</span>
+  </nav>
+
+  <div class="mb-6 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-line bg-white p-5 shadow-card sm:p-6">
+    <div>
+      <div class="flex flex-wrap items-center gap-3">
+        <h1 class="ltr text-xl font-bold tabular-nums tracking-tight" dir="ltr">{{ order.order_number }}</h1>
+        {% include "partials/status_badge.html" with kind="order" status=order.status %}
+        {% include "partials/status_badge.html" with kind="payment" status=order.payment_status %}
+      </div>
+      <p class="mt-2 text-[13px] text-muted">تاریخ ثبت: {% jalali_datetime order.created_at %}</p>
+    </div>
+
+    {% if order.can_pay %}
+      <form method="post" action="{% url 'orders:pay' order.order_number %}">
+        {% csrf_token %}
+        <button type="submit" class="btn-accent btn-shine btn-lg">پرداخت مبلغ {{ order.total|currency }}</button>
+      </form>
+    {% endif %}
+  </div>
+
+  <!-- اعلان پرداخت -->
+  {% if order.status == "pending_payment" %}
+    <div class="alert alert-warning mb-6">
+      این سفارش در انتظار پرداخت است. تا
+      <span class="font-semibold">{% jalali_datetime order.expires_at %}</span>
+      فرصت دارید پرداخت را انجام دهید؛ در غیر این صورت سفارش لغو و موجودی آزاد می‌شود.
+    </div>
+  {% elif order.status == "payment_failed" %}
+    <div class="alert alert-error mb-6">
+      پرداخت این سفارش ناموفق بود. می‌توانید دوباره تلاش کنید.
+    </div>
+  {% elif order.is_paid %}
+    <div class="alert alert-success mb-6">
+      پرداخت با موفقیت انجام شد.
+      {% if order.paid_at %}در تاریخ {% jalali_datetime order.paid_at %}{% endif %}
+      {% if order.tracking_number %} — کد رهگیری پست: <span class="ltr font-semibold" dir="ltr">{{ order.tracking_number }}</span>{% endif %}
+    </div>
+  {% endif %}
+
+  <!-- خط زمانی وضعیت سفارش -->
+  <section class="card mb-6 p-5 sm:p-6" aria-label="مراحل پیشرفت سفارش">
+    <h2 class="mb-5 text-sm font-bold">مسیر سفارش شما</h2>
+    <ol class="timeline">
+      <li class="timeline-step">
+        <span class="timeline-rail">
+          <span class="step-dot is-done">
+            <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 5 5 10-10.5"/></svg>
+          </span>
+          <span class="timeline-line bg-success/40" aria-hidden="true"></span>
+        </span>
+        <div class="pb-1">
+          <p class="text-sm font-bold">ثبت سفارش</p>
+          <p class="mt-0.5 text-xs text-muted">{% jalali_datetime order.created_at %}</p>
+        </div>
+      </li>
+      <li class="timeline-step">
+        <span class="timeline-rail">
+          {% if order.is_paid %}
+            <span class="step-dot is-done">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 5 5 10-10.5"/></svg>
+            </span>
+            <span class="timeline-line bg-success/40" aria-hidden="true"></span>
+          {% elif order.status == 'cancelled' or order.status == 'payment_failed' %}
+            <span class="step-dot grid border-sale/40 bg-sale-soft text-sale">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" d="M6 18 18 6M6 6l12 12"/></svg>
+            </span>
+            <span class="timeline-line" aria-hidden="true"></span>
+          {% else %}
+            <span class="step-dot is-current" aria-current="step">۲</span>
+            <span class="timeline-line" aria-hidden="true"></span>
+          {% endif %}
+        </span>
+        <div class="pb-1">
+          <p class="text-sm font-bold">پرداخت</p>
+          <p class="mt-0.5 text-xs text-muted">
+            {% if order.is_paid %}پرداخت شد{% if order.paid_at %} — {% jalali_datetime order.paid_at %}{% endif %}{% elif order.status == 'cancelled' %}لغو شد{% elif order.status == 'payment_failed' %}ناموفق — امکان تلاش مجدد هست{% else %}در انتظار پرداخت شما{% endif %}
+          </p>
+        </div>
+      </li>
+      <li class="timeline-step">
+        <span class="timeline-rail">
+          {% if order.status == 'shipped' or order.status == 'delivered' %}
+            <span class="step-dot is-done">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 5 5 10-10.5"/></svg>
+            </span>
+            <span class="timeline-line bg-success/40" aria-hidden="true"></span>
+          {% elif order.status == 'preparing' or order.status == 'ready_to_ship' %}
+            <span class="step-dot is-current" aria-current="step">۳</span>
+            <span class="timeline-line" aria-hidden="true"></span>
+          {% else %}
+            <span class="step-dot is-todo">۳</span>
+            <span class="timeline-line" aria-hidden="true"></span>
+          {% endif %}
+        </span>
+        <div class="pb-1">
+          <p class="text-sm font-bold">آماده‌سازی و ارسال</p>
+          <p class="mt-0.5 text-xs text-muted">
+            {% if order.status == 'preparing' or order.status == 'ready_to_ship' %}{{ order.status_label }}{% elif order.status == 'shipped' or order.status == 'delivered' %}ارسال شد{% if order.tracking_number %} — کد رهگیری: <span class="ltr font-bold tabular-nums" dir="ltr">{{ order.tracking_number }}</span>{% endif %}{% else %}پس از پرداخت آغاز می‌شود{% endif %}
+          </p>
+        </div>
+      </li>
+      <li class="timeline-step">
+        <span class="timeline-rail">
+          {% if order.status == 'delivered' %}
+            <span class="step-dot is-done">
+              <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 5 5 10-10.5"/></svg>
+            </span>
+          {% else %}
+            <span class="step-dot is-todo">۴</span>
+          {% endif %}
+        </span>
+        <div>
+          <p class="text-sm font-bold">تحویل</p>
+          <p class="mt-0.5 text-xs text-muted">{% if order.status == 'delivered' %}سفارش به دست شما رسید{% else %}پس از ارسال{% endif %}</p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <div class="grid gap-8 lg:grid-cols-[1fr_340px]">
+    <div class="flex flex-col gap-6">
+      <!-- اقلام -->
+      <section class="card p-5 sm:p-6">
+        <h2 class="mb-4 text-lg font-semibold">اقلام سفارش</h2>
+        <ul class="flex flex-col divide-y divide-line">
+          {% for item in order.items.all %}
+            <li class="flex gap-4 py-4 first:pt-0 last:pb-0">
+              <div class="h-20 w-16 shrink-0 overflow-hidden rounded-lg bg-sand">
+                {% if item.product_image %}
+                  <img src="{{ item.product_image }}" alt="{{ item.product_name }}"
+                       class="h-full w-full object-cover" width="160" height="200" loading="lazy">
+                {% endif %}
+              </div>
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-medium">{{ item.product_name }}</p>
+                <p class="mt-1 text-xs text-muted">{{ item.color_name }} / {{ item.size_name }}</p>
+                {% if item.sku %}
+                  <p class="mt-1 text-xs text-muted ltr inline-block" dir="ltr">{{ item.sku }}</p>
+                {% endif %}
+                <p class="mt-1 text-xs text-muted">تعداد: {{ item.quantity }}</p>
+              </div>
+              <div class="text-end">
+                <p class="text-sm font-semibold">{{ item.line_total|currency }}</p>
+                <p class="text-xs text-muted">{{ item.unit_price|currency }} × {{ item.quantity }}</p>
+                {% if item.discount_amount %}
+                  <p class="text-xs text-sale">− {{ item.discount_amount|currency }} تخفیف</p>
+                {% endif %}
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
+
+      <!-- آدرس -->
+      <section class="card p-5 sm:p-6">
+        <h2 class="mb-4 text-lg font-semibold">آدرس ارسال</h2>
+        <div class="text-sm">
+          <p class="font-medium">{{ order.receiver_name }}</p>
+          <p class="mt-1 leading-7 text-ink-soft">{{ order.address_snapshot }}</p>
+          <p class="mt-1 text-muted">
+            تلفن: <span class="ltr inline-block" dir="ltr">{{ order.receiver_phone }}</span>
+            — روش ارسال: {{ order.shipping_method }}
+          </p>
+          {% if order.customer_note %}
+            <p class="mt-3 rounded-lg bg-sand/70 p-3 leading-7 text-ink-soft">
+              یادداشت شما: {{ order.customer_note }}
+            </p>
+          {% endif %}
+        </div>
+      </section>
+
+      <!-- تراکنش‌ها -->
+      {% if payments %}
+      <section class="card p-5 sm:p-6">
+        <h2 class="mb-4 text-lg font-semibold">تراکنش‌های پرداخت</h2>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-line text-right text-xs text-muted">
+                <th class="py-2 font-medium">تاریخ</th>
+                <th class="py-2 font-medium">مبلغ</th>
+                <th class="py-2 font-medium">وضعیت</th>
+                <th class="py-2 font-medium">شماره پیگیری</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-line">
+              {% for payment in payments %}
+                <tr>
+                  <td class="py-3">{% jalali_datetime payment.created_at %}</td>
+                  <td class="py-3">{{ payment.amount|currency }}</td>
+                  <td class="py-3">{% include "partials/status_badge.html" with kind="payment" status=payment.status %}</td>
+                  <td class="py-3 ltr" dir="ltr">{{ payment.reference_id|default:"—" }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+    </div>
+
+    <!-- خلاصه -->
+    <aside>
+      <div class="card p-5 sm:p-6 lg:sticky lg:top-40">
+        <h2 class="mb-4 text-base font-semibold">خلاصه مالی</h2>
+        <div class="flex flex-col">
+          <div class="summary-row"><span class="text-muted">جمع کالاها</span><span>{{ order.subtotal|currency }}</span></div>
+          {% if order.discount_total %}
+            <div class="summary-row text-sale"><span>تخفیف</span><span>− {{ order.discount_total|currency }}</span></div>
+          {% endif %}
+          <div class="summary-row">
+            <span class="text-muted">هزینه ارسال</span>
+            <span>{% if order.shipping_fee %}{{ order.shipping_fee|currency }}{% else %}رایگان{% endif %}</span>
+          </div>
+          <div class="summary-total"><span>مبلغ قابل پرداخت</span><span>{{ order.total|currency }}</span></div>
+        </div>
+
+        {% if order.paid_at %}
+          <p class="mt-4 rounded-lg bg-success/10 p-3 text-xs leading-6 text-success">
+            پرداخت شده در {% jalali_datetime order.paid_at %}
+          </p>
+        {% endif %}
+
+        <a href="{% url 'orders:list' %}" class="btn-outline mt-4 w-full">بازگشت به سفارش‌ها</a>
+      </div>
+    </aside>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,9 @@
+{% load shop_extras %}
+<section class="card order-summary p-6">
+  <h2 class="mb-4 flex items-center gap-2 text-lg">{% include 'partials/icon.html' with kind='bag' %} خلاصه سفارش</h2>
+  <div class="summary-row"><span>جمع کالاها</span><span>{{ totals.subtotal|currency }}</span></div>
+  {% if totals.discount_total %}<div class="summary-row text-sale"><span>تخفیف</span><span>− {{ totals.discount_total|currency }}</span></div>{% endif %}
+  <div class="summary-row"><span>هزینه ارسال</span><span>{% if totals.shipping_fee %}{{ totals.shipping_fee|currency }}{% else %}رایگان{% endif %}</span></div>
+  <div class="summary-total"><span>مبلغ کل</span><span>{{ totals.total|currency }}</span></div>
+  {% block summary_actions %}{% endblock %}
+</section>

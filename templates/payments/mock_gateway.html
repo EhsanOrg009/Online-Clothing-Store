@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% load shop_extras %}
+{% block title %}درگاه آزمایشی | {{ STORE_NAME }}
+{% endblock %}
+{% block content %}
+<div class="container-page py-12">
+<section class="card result-panel mx-auto max-w-xl p-6 sm:p-10"><span class="badge-warning">فقط محیط توسعه</span>
+<h1 class="section-title mt-5">شبیه‌ساز پرداخت</h1><p class="alert alert-warning my-5">این صفحه پرداخت واقعی انجام نمی‌دهد. نتیجه انتخابی برای آزمایش مسیر بازگشت به فروشگاه است.</p>
+<dl>
+<div class="spec-row"><dt>سفارش</dt><dd><bdi dir="ltr">{{ payment.order.order_number }}</bdi></dd>
+</div>
+<div class="spec-row"><dt>مبلغ آزمایش</dt><dd>{{ payment.amount|currency }}</dd>
+</div>
+</dl>
+<div class="mt-6 flex flex-col gap-3"><a class="btn-primary" href="{{ callback_urls.successful }}">آزمایش نتیجه موفق</a><a class="btn-outline" href="{{ callback_urls.failed }}">آزمایش نتیجه ناموفق</a><a class="btn-ghost" href="{{ callback_urls.cancelled }}">انصراف از پرداخت</a>
+</div>
+</section>
+</div>
+{% endblock %}

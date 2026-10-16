@@ -1,0 +1,23 @@
+{% extends 'orders/checkout_address.html' %}
+{% load shop_extras %}
+{% block content %}
+<div class="container-page py-8">{% include 'partials/checkout_steps_v2.html' %}<header class="page-heading mt-8">
+<h1 class="section-title">آدرس تحویل سفارش</h1><p class="mt-2 text-muted">آدرس را انتخاب کنید یا یک نشانی جدید ذخیره کنید.</p>
+</header>
+<div class="workflow-layout">
+<div>
+{% if addresses %}<form method="post" class="card flex flex-col gap-5 p-6 sm:p-8">{% csrf_token %}<input type="hidden" name="action" value="select">
+<fieldset><legend class="mb-4 font-semibold">انتخاب آدرس</legend>{% for address in addresses %}<label class="address-choice mb-3 flex cursor-pointer items-start gap-3 rounded-lg border border-line p-4"><input type="radio" name="address_id" value="{{ address.pk }}" class="field-checkbox mt-1 shrink-0" required {% if selected.pk == address.pk %}checked{% endif %}><span><strong>{{ address.receiver_name }}</strong>{% if address.is_default %}<span class="badge-accent ms-2">پیش‌فرض</span>{% endif %}<span class="mt-2 block text-sm text-muted">{{ address.single_line }}</span><bdi dir="ltr" class="mt-1 block text-sm">{{ address.receiver_phone }}</bdi></span></label>{% endfor %}</fieldset><button class="btn-primary" type="submit">ادامه با آدرس انتخاب‌شده</button>
+</form>{% endif %}
+<details class="card mt-6 p-6 sm:p-8" {% if not addresses or address_form.errors %}open{% endif %}><summary class="font-semibold">افزودن آدرس جدید</summary>
+<form method="post" class="mt-6 flex flex-col gap-5">{% csrf_token %}<input type="hidden" name="action" value="add_address">{% include 'partials/accessible_fields.html' with form=address_form %}<button type="submit" class="btn-primary">ذخیره آدرس و ادامه</button>
+</form>
+</details>
+<section class="card mt-6 p-5">
+<h2 class="mb-3">روش ارسال</h2>{% for option in shipping_options %}<p class="text-sm">{{ option.label }} · {% if totals.shipping_fee %}{{ totals.shipping_fee|currency }}{% else %}رایگان{% endif %}</p>{% endfor %}</section>
+</div>
+<aside class="workflow-summary">{% include 'partials/order_summary.html' %}<a class="btn-outline mt-4 w-full" href="{% url 'cart:detail' %}">بازگشت به سبد خرید</a>
+</aside>
+</div>
+</div>
+{% endblock %}

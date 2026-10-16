@@ -1,0 +1,22 @@
+{% load shop_extras %}
+{% with price=product.price_info image=product.primary_image %}
+<article class="product-card">
+  <a class="product-card__media" href="{% url 'store:product_detail' product.slug %}" aria-label="مشاهده {{ product.name }}">
+    {% if image %}
+      <img src="{{ image.image.url }}" alt="{{ image.alt|default:product.name }}" width="600" height="800" loading="lazy" decoding="async">
+    {% else %}
+      <span class="media-fallback">{% include 'partials/icon.html' with kind='shirt' %}<span>تصویر {{ product.name }} هنوز ثبت نشده است</span></span>
+    {% endif %}
+    {% if price.has_discount %}<span class="badge-sale absolute start-3 top-3">{{ price.discount_percent|percent }} تخفیف</span>{% endif %}
+    {% if not product.is_in_stock %}<span class="badge-muted absolute bottom-3 start-3">ناموجود</span>{% endif %}
+  </a>
+  <div class="product-card__body">
+    <p class="text-xs text-muted">{{ product.category.name }}</p>
+    <h3><a href="{% url 'store:product_detail' product.slug %}">{{ product.name }}</a></h3>
+    <div class="product-card__price">
+      {% if price.has_discount %}<del class="text-xs text-muted">{{ price.base_price|currency }}</del>{% endif %}
+      <strong class="product-price-label">{{ price.final_price|currency }}</strong>
+    </div>
+  </div>
+</article>
+{% endwith %}

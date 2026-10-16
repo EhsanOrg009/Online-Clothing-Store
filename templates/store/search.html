@@ -1,0 +1,3 @@
+{% extends 'base.html' %}
+{% block title %}جستجوی {{ query }} | {{ STORE_NAME }}{% endblock %}
+{% block content %}{% include 'partials/catalog.html' with is_search=True %}{% endblock %}

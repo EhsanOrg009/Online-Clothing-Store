@@ -1,0 +1,37 @@
+{% load static shop_extras %}
+<footer class="site-footer">
+  <div class="container-page footer-intro">
+    <a class="wordmark" href="{% url 'store:home' %}"><span class="brand-symbol">{% include 'partials/icon.html' with kind='shirt' %}</span>{{ STORE_NAME }}</a>
+    <a class="btn-outline" href="#main">بازگشت به بالای صفحه</a>
+  </div>
+  <div class="container-page footer-columns">
+    <div>
+      <h2>انتخاب لباس، به سبک شما</h2>
+      <p class="max-w-sm leading-7 text-muted">رنگ، سایز، قیمت و موجودی را کنار هم بررسی کنید. پس از خرید، سفارش و اطلاعات تحویل در حساب شما در دسترس است.</p>
+      <p class="mt-4 text-muted">{{ STORE_ADDRESS }}</p>
+      <a class="footer-contact" href="tel:{{ STORE_PHONE }}">{% include 'partials/icon.html' with kind='phone' %}<bdi dir="ltr">{{ STORE_PHONE }}</bdi></a>
+      <a class="footer-contact" href="mailto:{{ STORE_EMAIL }}">{% include 'partials/icon.html' with kind='mail' %}<bdi dir="ltr">{{ STORE_EMAIL }}</bdi></a>
+    </div>
+    <nav aria-label="راهنمای خرید">
+      <h2>مجموعهٔ فروشگاه</h2>
+      <a href="{% url 'store:product_list' %}">همه محصولات</a>
+      <a href="{% url 'store:categories' %}">دسته‌بندی‌ها</a>
+      <a href="{% url 'store:product_list' %}?sort=newest">تازه رسیده‌ها</a>
+      <a href="{% url 'store:product_list' %}?discount_only=on">محصولات تخفیف‌دار</a>
+      <a href="{% url 'cart:detail' %}">سبد خرید</a>
+    </nav>
+    <nav aria-label="حساب کاربری">
+      <h2>همراه خرید شما</h2>
+      <a href="{% url 'accounts:profile' %}">اطلاعات حساب</a>
+      <a href="{% url 'orders:list' %}">سفارش‌ها و پیگیری</a>
+      <a href="{% url 'accounts:address_list' %}">آدرس‌های تحویل</a>
+      {% if user.is_staff %}<a href="{% url 'admin:index' %}">مدیریت فروشگاه</a>{% endif %}
+      <p class="mt-2 text-muted">{% if FREE_SHIPPING_MIN_AMOUNT %}ارسال رایگان از {{ FREE_SHIPPING_MIN_AMOUNT|currency }}{% else %}هزینه ارسال: {{ SHIPPING_FEE|currency }}{% endif %}</p>
+    </nav>
+  </div>
+  <div class="container-page footer-bottom">
+    <span>© {% now 'Y' %} {{ STORE_NAME }}</span>
+    <span>اطلاعات کارت بانکی در فروشگاه دریافت یا ذخیره نمی‌شود.</span>
+  </div>
+</footer>
+<script src="{% static 'js/shop.js' %}" nonce="{{ csp_nonce }}" defer></script>

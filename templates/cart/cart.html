@@ -1,0 +1,9 @@
+{% extends 'base.html' %}
+{% block title %}سبد خرید | {{ STORE_NAME }}{% endblock %}
+{% block content %}
+<div class="container-page py-8">
+  <header class="page-heading section-head"><div><h1 class="section-title">سبد خرید</h1><p class="section-note">انتخاب‌های شما؛ قیمت و تعداد کالاها را پیش از ادامه بررسی کنید.</p></div><span id="cart-spinner" class="htmx-indicator text-sm" role="status">در حال بروزرسانی…</span></header>
+  <p hidden data-cart-network-error class="alert alert-error mb-4" role="alert">بروزرسانی سبد انجام نشد. اتصال را بررسی کنید و دوباره تلاش کنید.</p>
+  <div id="cart-content">{% include 'partials/cart_content.html' %}</div>
+</div>
+{% endblock %}

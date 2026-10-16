@@ -1,0 +1,9 @@
+<div class="category-directory">
+  {% for category in categories %}
+    <a class="category-entry" href="{% url 'store:category' category.slug %}">
+      {% if category.image %}<img src="{{ category.image.url }}" alt="{{ category.name }}" width="160" height="192" loading="lazy">{% else %}<span class="category-placeholder">{% include 'partials/icon.html' with kind='shirt' %}</span>{% endif %}
+      <span class="flex-1"><strong>{{ category.name }}</strong>{% if category.description %}<span class="block text-sm text-muted">{{ category.description|truncatechars:100 }}</span>{% endif %}<span class="text-xs text-muted">{{ category.product_count }} محصول در این دسته</span></span>
+      {% include 'partials/icon.html' with kind='arrow' %}
+    </a>
+  {% endfor %}
+</div>

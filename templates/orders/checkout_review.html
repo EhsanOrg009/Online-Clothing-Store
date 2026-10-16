@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% load shop_extras %}
+
+{% block title %}بررسی سفارش | {{ STORE_NAME }}{% endblock %}
+
+{% block content %}
+<div class="container-page py-10">
+  {% include "partials/checkout_steps.html" with step=step %}
+
+  <div class="mt-8 grid gap-8 lg:grid-cols-[1fr_340px]">
+    <div class="flex flex-col gap-6">
+      <section class="card p-5 sm:p-6">
+        <div class="mb-5 flex items-center justify-between gap-3 border-b border-line pb-4">
+          <h1 class="flex items-center gap-2.5 text-lg font-semibold">
+            <span class="icon-circle-accent h-8 w-8" aria-hidden="true">
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 5 5 10-10.5"/>
+              </svg>
+            </span>
+            مرحله ۲: بررسی سفارش
+          </h1>
+          <a href="{% url 'orders:checkout' %}" class="btn-outline btn-sm">تغییر آدرس</a>
+        </div>
+
+        <div class="rounded-xl border border-line bg-sand/60 p-4 text-sm">
+          <p class="flex items-center gap-2 font-medium">
+            <svg class="h-4 w-4 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/><path stroke-linecap="round" stroke-linejoin="round"
+                    d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z"/>
+            </svg>
+            {{ address.receiver_name }}
+          </p>
+          <p class="mt-1.5 ps-6 leading-7 text-ink-soft">{{ address.single_line }}</p>
+          <p class="mt-1 ps-6 text-muted">
+            تلفن: <span class="ltr inline-block" dir="ltr">{{ address.receiver_phone }}</span>
+          </p>
+        </div>
+      </section>
+
+      <section class="card p-5 sm:p-6">
+        <h2 class="mb-4 text-lg font-semibold">اقلام سفارش</h2>
+        <ul class="flex flex-col divide-y divide-line">
+          {% for item in items %}
+            <li class="flex gap-4 py-4 first:pt-0 last:pb-0">
+              <div class="h-20 w-16 shrink-0 overflow-hidden rounded-lg bg-sand">
+                {% with image=item.variant.product.primary_image %}
+                  {% if image %}
+                    <img src="{{ image.image.url }}" alt="{{ image.alt }}" class="h-full w-full object-cover"
+                         width="160" height="200" loading="lazy" decoding="async">
+                  {% endif %}
+                {% endwith %}
+              </div>
+
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-medium">{{ item.variant.product.name }}</p>
+                <p class="mt-1 text-xs text-muted">{{ item.variant.color.name }} / {{ item.variant.size.name }}</p>
+                <p class="mt-1 text-xs text-muted">تعداد: {{ item.quantity }}</p>
+              </div>
+
+              <div class="text-end">
+                <p class="text-sm font-semibold">{{ item.line_total|currency }}</p>
+                {% if item.line_discount %}
+                  <p class="text-xs text-sale">− {{ item.line_discount|currency }}</p>
+                {% endif %}
+                <p class="text-xs text-muted">{{ item.final_unit_price|currency }} × {{ item.quantity }}</p>
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+      </section>
+
+      <section class="card p-5 sm:p-6">
+        <h2 class="mb-4 text-lg font-semibold">یادداشت برای فروشگاه (اختیاری)</h2>
+        <form method="post" action="{% url 'orders:checkout_review' %}" class="flex flex-col gap-4">
+          {% csrf_token %}
+          {% include "partials/form_fields.html" with form=note_form %}
+          <div class="mt-2 flex flex-wrap items-center gap-4">
+            <button type="submit" class="btn-primary btn-lg btn-shine">
+              <svg class="h-4.5 w-4.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true">
+                <rect x="4.5" y="10.5" width="15" height="10" rx="2"/>
+                <path stroke-linecap="round" d="M8 10.5V7.75a4 4 0 0 1 8 0v2.75"/>
+              </svg>
+              ثبت سفارش و پرداخت
+            </button>
+            <a href="{% url 'cart:detail' %}" class="btn-ghost">بازگشت به سبد خرید</a>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <!-- خلاصه نهایی -->
+    <aside>
+      <div class="card p-5 sm:p-6 lg:sticky lg:top-40">
+        <h2 class="mb-4 text-base font-semibold">خلاصه پرداخت</h2>
+        <div class="flex flex-col">
+          <div class="summary-row"><span class="text-muted">تعداد کالاها</span><span>{{ totals.items_count }}</span></div>
+          <div class="summary-row"><span class="text-muted">جمع کالاها</span><span>{{ totals.subtotal|currency }}</span></div>
+          {% if totals.has_discount %}
+            <div class="summary-row text-sale"><span>تخفیف</span><span>− {{ totals.discount_total|currency }}</span></div>
+          {% endif %}
+          <div class="summary-row">
+            <span class="text-muted">هزینه ارسال</span>
+            <span>{% if totals.shipping_fee %}{{ totals.shipping_fee|currency }}{% else %}رایگان{% endif %}</span>
+          </div>
+          <div class="summary-total"><span>مبلغ قابل پرداخت</span><span>{{ totals.total|currency }}</span></div>
+        </div>
+
+        <p class="mt-4 text-xs leading-6 text-muted">
+          با ثبت سفارش، موجودی کالاها رزرو و صفحه پرداخت درگاه برای شما باز می‌شود.
+        </p>
+      </div>
+    </aside>
+  </div>
+</div>
+{% endblock %}

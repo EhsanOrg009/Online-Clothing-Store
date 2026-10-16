@@ -1,0 +1,4 @@
+<a class="chip" href="{% url 'store:categories' %}" {% if request.resolver_match.url_name == 'categories' %}aria-current="page"{% endif %}>{% include 'partials/icon.html' with kind='grid' %} دسته‌بندی‌ها</a>
+<a class="chip" href="{% url 'store:product_list' %}" {% if request.resolver_match.url_name == 'product_list' and not request.GET.discount_only and not request.GET.sort %}aria-current="page"{% endif %}>همه محصولات</a>
+<a class="chip" href="{% url 'store:product_list' %}?sort=newest" {% if request.GET.sort == 'newest' %}aria-current="page"{% endif %}>تازه‌های فروشگاه</a>
+<a class="chip-sale" href="{% url 'store:product_list' %}?discount_only=on" {% if request.GET.discount_only %}aria-current="page"{% endif %}>{% include 'partials/icon.html' with kind='tag' %} تخفیف‌ها</a>
