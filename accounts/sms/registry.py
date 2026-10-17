@@ -5,7 +5,7 @@ from __future__ import annotations
 from django.conf import settings
 from django.utils.module_loading import import_string
 
-from .base import SMSProvider
+from .base import SMSProvider, SMSProviderError
 from .console import ConsoleSMSProvider
 from .memory import InMemorySMSProvider
 

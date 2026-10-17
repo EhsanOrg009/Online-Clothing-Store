@@ -2,7 +2,7 @@
 #  فروشگاه اینترنتی پوشاک — Docker Compose (Production / استقرار)
 #
 #  اجرا:
-#      docker compose up -d --build
+#      sh scripts/compose-production up -d --build
 #
 #  برای توسعه با Hot-Reload از `docker-compose.override.yml` استفاده کنید
 #  (به‌طور خودکار خوانده می‌شود):
@@ -115,7 +115,7 @@ services:
       # فقط یک دیتابیس نمایش داده شود
       PMA_ONLYDB: ${DATABASE_NAME:-clothing_shop}
     ports:
-      - "${PMA_PORT:-8080}:80"
+      - "127.0.0.1:${PMA_PORT:-8080}:80"
     depends_on:
       db:
         condition: service_healthy

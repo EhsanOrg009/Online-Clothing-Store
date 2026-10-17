@@ -21,6 +21,14 @@ node_modules
 .env
 .env.*
 !.env.example
+!.env.production.example
+# Local reports, QA credentials and certificate exports must never enter images.
+*.pem
+*.key
+*.sql
+*.sql.gz
+*.tar.gz
+backups
 
 # ---------- لاگ و خروجی‌ها ----------
 logs

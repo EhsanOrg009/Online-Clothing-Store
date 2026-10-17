@@ -1,0 +1,21 @@
+#!/bin/sh
+# Invoke production Compose files explicitly so the development override is
+# never auto-merged. Usage: scripts/compose-production [--bootstrap] <command>.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$ROOT"
+
+ENV_PATH=${ENV_FILE:-.env.production}
+if [ ! -f "$ENV_PATH" ]; then
+    printf 'Missing %s. Copy .env.production.example to .env.production and set real secrets.\n' "$ENV_PATH" >&2
+    exit 2
+fi
+
+if [ "${1:-}" = "--bootstrap" ]; then
+    shift
+    exec docker compose -f docker-compose.yml -f docker-compose.production.yml \
+        -f docker-compose.bootstrap.yml --env-file "$ENV_PATH" "$@"
+fi
+
+exec docker compose -f docker-compose.yml -f docker-compose.production.yml \
+    --env-file "$ENV_PATH" "$@"

@@ -5,12 +5,19 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
+from common.views import healthz, readyz
+
 # ظاهر و عنوان‌های پنل مدیریت (فارسی و RTL)
 admin.site.site_header = "پنل مدیریت فروشگاه پوشاک"
 admin.site.site_title = "مدیریت فروشگاه"
 admin.site.index_title = "داشبورد مدیریت"
 
 urlpatterns = [
+    # Healthcheck: برای Docker HEALTHCHECK و Load Balancer/مانیتورینگ.
+    # روی HTTP هم پاسخ می‌دهد (از SECURE_SSL_REDIRECT مستثناست) و
+    # nginx فقط از شبکه‌ی داخلی به آن دسترسی می‌دهد.
+    path("healthz/", healthz, name="healthz"),
+    path("readyz/", readyz, name="readyz"),
     path("admin/", admin.site.urls),
     path("", include("store.urls")),
     path("accounts/", include("accounts.urls")),

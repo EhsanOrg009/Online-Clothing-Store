@@ -1,9 +1,40 @@
-"""صفحات خطای سفارشی (فارسی و RTL)."""
+"""صفحات خطای سفارشی (فارسی و RTL) و Healthcheck."""
 
+from django.db import connection
 from django.shortcuts import render
 from django.conf import settings
 from django.http import HttpResponse
 from django.template.loader import render_to_string
+from django.views.decorators.cache import never_cache
+from django.views.decorators.http import require_GET
+
+
+@require_GET
+@never_cache
+def healthz(request):
+    """بررسی زنده‌بودن پردازه (Liveness).
+
+    عمداً هیچ Query یا I/O ندارد: اگر دیتابیس قطع باشد هم Gunicorn باید
+    در وضعیت healthy بماند تا سرویس‌های وابسته بیهوده ری‌استارت نشوند.
+    """
+    return HttpResponse("ok", content_type="text/plain; charset=utf-8")
+
+
+@require_GET
+@never_cache
+def readyz(request):
+    """بررسی آمادگی برای سرو درخواست (Readiness) — شامل اتصال دیتابیس."""
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+    except Exception:  # noqa: BLE001 - فقط وضعیت را گزارش می‌کنیم
+        return HttpResponse(
+            "database unavailable",
+            status=503,
+            content_type="text/plain; charset=utf-8",
+        )
+    return HttpResponse("ok", content_type="text/plain; charset=utf-8")
 
 
 def bad_request(request, exception=None):

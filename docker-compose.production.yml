@@ -1,0 +1,130 @@
+# Use scripts/compose-production; never merge the development override here.
+x-logs: &logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  web:
+    ports: !reset []
+    environment:
+      DEBUG: "False"
+      DATABASE_ENGINE: mysql
+      SITE_URL: ${SITE_URL:-https://minikandoo.ir}
+      API_URL: ${API_URL:-https://api.minikandoo.ir}
+      ALLOWED_HOSTS: minikandoo.ir,www.minikandoo.ir,api.minikandoo.ir,localhost
+      CSRF_TRUSTED_ORIGINS: https://minikandoo.ir,https://www.minikandoo.ir
+      TRUSTED_PROXY_IPS: ${NGINX_PROXY_IP:-172.30.50.2}
+      SECURE_SSL_REDIRECT: "True"
+      SESSION_COOKIE_SECURE: "True"
+      CSRF_COOKIE_SECURE: "True"
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_CONN_MAX_AGE: ${DATABASE_CONN_MAX_AGE:-60}
+      SHIPPING_FEE: ${SHIPPING_FEE:-50000}
+      FREE_SHIPPING_MIN_AMOUNT: ${FREE_SHIPPING_MIN_AMOUNT:-2000000}
+      SHIPPING_METHOD_NAME: ${SHIPPING_METHOD_NAME:-ارسال پست پیشتاز}
+      MAX_QUANTITY_PER_ITEM: ${MAX_QUANTITY_PER_ITEM:-10}
+      ORDER_RESERVATION_MINUTES: ${ORDER_RESERVATION_MINUTES:-30}
+      SESSION_COOKIE_AGE: ${SESSION_COOKIE_AGE:-2592000}
+      SMS_API_KEY: ${SMS_API_KEY:-}
+      SMS_API_SECRET: ${SMS_API_SECRET:-}
+      SMS_SENDER: ${SMS_SENDER:-}
+      OTP_LENGTH: ${OTP_LENGTH:-5}
+      OTP_TTL_SECONDS: ${OTP_TTL_SECONDS:-180}
+      OTP_MAX_ATTEMPTS: ${OTP_MAX_ATTEMPTS:-5}
+      OTP_RESEND_SECONDS: ${OTP_RESEND_SECONDS:-90}
+      OTP_RESEND_LIMIT_PER_HOUR: ${OTP_RESEND_LIMIT_PER_HOUR:-5}
+      PAYMENT_MERCHANT_ID: ${PAYMENT_MERCHANT_ID:-}
+      PAYMENT_API_KEY: ${PAYMENT_API_KEY:-}
+      SECURE_HSTS_SECONDS: ${SECURE_HSTS_SECONDS:-0}
+      SECURE_HSTS_INCLUDE_SUBDOMAINS: ${SECURE_HSTS_INCLUDE_SUBDOMAINS:-False}
+      SECURE_HSTS_PRELOAD: ${SECURE_HSTS_PRELOAD:-False}
+      LOG_TO_FILE: "False"
+      MIGRATE_ON_START: "0"
+      COLLECTSTATIC_ON_START: "1"
+      SEED_ON_START: "0"
+      WAIT_TIMEOUT: "180"
+    volumes:
+      - staticfiles:/app/staticfiles
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      shop-net: {}
+      proxy-net: {}
+    logging: *logs
+
+  db:
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set an independent database root password}
+    logging: *logs
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # Rate-limit state survives service recreation; never evict active counters.
+    command: [redis-server, --appendonly, "yes", --maxmemory, 128mb, --maxmemory-policy, noeviction]
+    volumes:
+      - redis-data:/data
+    networks: [shop-net]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: *logs
+
+  nginx:
+    image: nginx:1.28-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_BIND:-0.0.0.0}:${HTTP_PORT:-80}:80"
+      - "${HTTPS_BIND:-0.0.0.0}:${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+      - staticfiles:/srv/staticfiles:ro
+      - media-data:/srv/media:ro
+      - certbot-webroot:/var/www/certbot:ro
+      - letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      web:
+        condition: service_healthy
+    networks:
+      proxy-net:
+        ipv4_address: ${NGINX_PROXY_IP:-172.30.50.2}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8081/nginx-health]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    logging: *logs
+
+  certbot:
+    image: certbot/certbot:v5.0.0
+    profiles: [certificates]
+    volumes:
+      - certbot-webroot:/var/www/certbot
+      - letsencrypt:/etc/letsencrypt
+    networks: [proxy-net]
+    logging: *logs
+
+networks:
+  proxy-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${PROXY_SUBNET:-172.30.50.0/24}
+  shop-net:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${APP_SUBNET:-172.30.51.0/24}
+
+volumes:
+  redis-data:
+  staticfiles:
+  certbot-webroot:
+  letsencrypt:

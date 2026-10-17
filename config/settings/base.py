@@ -30,6 +30,20 @@ ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=[])
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 
 # ---------------------------------------------------------------------
+# آدرس‌های عمومی سایت و API
+#
+# در Production سایت روی دامنه‌ی اصلی و API روی ساب‌دامین سرو می‌شود:
+#     SITE_URL=https://minikandoo.ir
+#     API_URL=https://api.minikandoo.ir
+#
+# این‌ها برای ساخت URL مطلق (ایمیل/پیامک، Callback درگاه، مستندات API) و
+# مجازکردن درخواست‌های Cross-origin در CSP استفاده می‌شوند. هیچ آدرسی در
+# کد Hardcode نشده است.
+# ---------------------------------------------------------------------
+SITE_URL = env("SITE_URL", default="http://localhost:8000").rstrip("/")
+API_URL = env("API_URL", default="").rstrip("/")
+
+# ---------------------------------------------------------------------
 # اپلیکیشن‌ها
 # ---------------------------------------------------------------------
 INSTALLED_APPS = [
@@ -52,6 +66,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "common.middleware.APIHostMiddleware",
     "django.middleware.csp.ContentSecurityPolicyMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "common.middleware.SecurityHeadersMiddleware",
@@ -132,11 +147,11 @@ LOGOUT_REDIRECT_URL = "store:home"
 # ---------------------------------------------------------------------
 # Static / Media
 # ---------------------------------------------------------------------
-STATIC_URL = "static/"
+STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 
-MEDIA_URL = "media/"
+MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 STORAGES = {
@@ -172,7 +187,8 @@ SECURE_CSP = {
     "style-src": [CSP.SELF, CSP.UNSAFE_INLINE],
     "script-src": [CSP.SELF, CSP.NONCE, CSP.UNSAFE_EVAL],
     "font-src": [CSP.SELF, "data:"],
-    "connect-src": [CSP.SELF],
+    # درخواست‌های JS به همان origin و (در صورت تنظیم) به ساب‌دامین API
+    "connect-src": [CSP.SELF] + ([API_URL] if API_URL else []),
     "object-src": [CSP.NONE],
     "base-uri": [CSP.SELF],
     "form-action": [CSP.SELF],

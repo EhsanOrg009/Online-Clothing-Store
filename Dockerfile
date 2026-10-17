@@ -130,7 +130,7 @@ USER app
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=5 \
-    CMD curl -fsS http://127.0.0.1:8000/ >/dev/null || exit 1
+    CMD curl -fsS -H 'Host: localhost' http://127.0.0.1:8000/healthz/ >/dev/null || exit 1
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]
 
