@@ -30,3 +30,6 @@ Thumbs.db
 
 # ---------- MySQL (local dev server data) ----------
 .mysql-data/
+
+# ---------- Docker ----------
+docker-compose.override.yml
