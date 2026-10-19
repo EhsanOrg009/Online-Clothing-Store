@@ -1,196 +1,240 @@
-# فروشگاه اینترنتی پوشاک
+# 🛍️ Clothing E-Commerce Store
 
-فروشگاه اینترنتی کامل و آماده‌ی استفاده‌ی واقعی، با **Django 6.1 + MySQL/MariaDB** و رابط کاربری تماماً فارسی و RTL.
+A full-featured clothing e-commerce application built with **Django 6.1 and MySQL/MariaDB**, featuring a fully Persian, right-to-left (RTL) storefront and administration panel.
 
-بدون هیچ Placeholder، تستی یا منطق جعلی. همه‌چیز واقعی است: احراز هویت با OTP، سبد خرید، ثبت سفارش با قفل ردیفی، و پرداخت Redirect-Based با تأیید سمت سرور.
-
----
-
-## فهرست
-
-- [امکانات](#امکانات)
-- [پشته‌ی فناوری](#پشتهی-فناوری)
-- [راه‌اندازی سریع](#راهاندازی-سریع)
-- [اجرا با Docker (پیشنهادی)](#اجرا-با-docker-پیشنهادی)
-- [ساخت دیتابیس و اتصال phpMyAdmin](#ساخت-دیتابیس-و-اتصال-phpmyadmin)
-- [اجرای پروژه](#اجرای-پروژه)
-- [داده‌های نمونه](#دادههای-نمونه)
-- [تست‌ها](#تستها)
-- [ساخت فایل‌های CSS/JS](#ساخت-فایلهای-cssjs)
-- [پیکربندی پیامک](#پیکربندی-پیامک)
-- [پیکربندی درگاه پرداخت](#پیکربندی-درگاه-پرداخت)
-- [استقرار Production](#استقرار-production)
-- [عیب‌یابی](#عیبیابی)
+It includes phone-number authentication with one-time passwords (OTP), product variants, shopping carts, inventory-safe order creation, and redirect-based payments with server-side verification.
 
 ---
+## 📌 Features
 
-## امکانات
-
-### فروشگاه
-- صفحه‌ی خانه با محصولات ویژه و تخفیف‌دار
-- فروشگاه با فیلتر رنگ، سایز، بازه‌ی قیمت، فقط تخفیف‌دار، فقط موجود و مرتب‌سازی
-- جستجوی واقعی در نام، توضیحات و نام دسته‌بندی
-- صفحه‌ی دسته‌بندی‌ها و صفحه‌ی اختصاصی هر دسته (شامل زیردسته‌ها)
-- جزئیات محصول با انتخاب رنگ/سایز، نمایش موجودی لحظه‌ای و محصولات مرتبط
-- اسلاگ فارسی در URL
-
-### احراز هویت (فقط شماره موبایل + OTP)
-- بدون رمز عبور؛ ورود با شماره‌ی موبایل و کد یک‌بارمصرف
-- کد هرگز خام ذخیره نمی‌شود؛ فقط **HMAC-SHA256** آن با `SECRET_KEY`
-- انقضا، محدودیت تلاش، فاصله‌ی ارسال مجدد و سقف درخواست در ساعت
-- Rate Limiting مبتنی بر Cache برای IP و شماره
-- ادغام خودکار سبد خرید مهمان با سبد کاربر پس از ورود
-- تکمیل پروفایل و مدیریت آدرس‌ها
-
-### سبد خرید و سفارش
-- سبد برای مهمان (Session) و کاربر واردشده
-- بروزرسانی و حذف آیتم با **HTMX** بدون Reload
-- **موجودی در سطح واریانت (رنگ + سایز)**
-- جلوگیری از Overselling با `Transaction` + `SELECT ... FOR UPDATE` + شرط SQL
-- Snapshot کامل قیمت، نام، رنگ، سایز و آدرس در لحظه‌ی ثبت سفارش
-- محاسبه‌ی همه‌ی مقادیر مالی **فقط در Backend** با `Decimal` (هرگز `float`)
-- ارسال پست پیشتاز، ارسال رایگان بالای سقف، یادداشت مشتری
-- انقضای خودکار سفارش‌های پرداخت‌نشده و آزادسازی موجودی
-
-### پرداخت (Hosted / Redirect Gateway)
-- هیچ اطلاعات کارتی روی سرور ما ذخیره یا پردازش نمی‌شود
-- انتقال به درگاه با `meta http-equiv=refresh` — **بدون نیاز به JavaScript**
-- امضای HMAC روی پارامترهای شروع و بازگشت
-- **همیشه Verify سمت سرور**؛ داده‌ی Query به‌تنهایی پذیرفته نمی‌شود
-- Callback **Idempotent** — ارسال دوباره باعث پردازش مجدد یا کم‌شدن دوباره‌ی موجودی نمی‌شود
-- درگاه Mock برای توسعه با صفحه‌ی شبیه‌سازی‌شده‌ی درگاه بانکی
-
-### پنل مدیریت
-- ظاهر فارسی و RTL
-- داشبورد آماری (فروش، سفارش‌ها، موجودی رو به اتمام)
-- گذار وضعیت سفارش از مسیر کنترل‌شده
-- مدیریت محصول، دسته‌بندی، رنگ، سایز، تخفیف، کاربران، آدرس‌ها و تراکنش‌ها
-
-### امنیت
-- همه‌ی Secret ها در Environment؛ فایل `.env` در `.gitignore`
-- CSP بومی Django 6.1 با Nonce؛ `unsafe-inline` برای Script ممنوع
-- هیچ Inline Event Handler ای در قالب‌ها وجود ندارد
-- Security Headers کامل (`X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, HSTS)
-- اعتبارسنجی کامل ورودی‌ها در هر دو سطح Form و Service
-- محافظت Brute-Force با شمارنده‌ی تلاش‌ها
+- Persian RTL storefront and administration panel
+- Homepage featuring selected and discounted products
+- Product catalog with filters for color, size, price range, availability, and discounts, plus sorting
+- Search across product names, descriptions, and category names
+- Categories, subcategories, Persian URL slugs, product details, and related products
+- Product variants based on color and size, with variant-level inventory tracking
+- Passwordless sign-in using a phone number and one-time password (OTP)
+- OTP expiration, attempt limits, resend cooldowns, hourly request limits, and cache-based rate limiting
+- HMAC-SHA256 OTP hashing; plaintext OTP values are not stored
+- Automatic merging of a guest cart into the signed-in user's cart
+- Customer profile and address management
+- Session-based carts for guests and database-backed carts for authenticated users
+- HTMX-powered cart updates without a full page reload
+- Transactional order creation using row locks and conditional SQL updates to prevent overselling
+- Order snapshots that preserve product, variant, price, and shipping-address details at checkout
+- Backend-only financial calculations using Python `Decimal`, not `float`
+- Shipping options, free shipping above a configured threshold, and customer order notes
+- Expiration of unpaid orders and release of reserved inventory
+- Hosted/redirect-based payment flow; card details are not stored or processed by this application
+- HMAC-signed payment parameters, mandatory server-side verification, and idempotent callbacks
+- A mock payment gateway for development only
+- Admin dashboard for sales, orders, and low-stock products
+- Controlled order-status transitions and management of products, categories, variants, discounts, customers, addresses, and transactions
+- Security headers, Content Security Policy (CSP) with nonces, input validation, and brute-force protection
 
 ---
+## 🛠️ Technologies Used
 
-## پشته‌ی فناوری
+- **Python 3.14** and **Django 6.1** — backend and application framework
+- **uv** — Python dependency and environment management
+- **MySQL 8+ / MariaDB 10.6+** — relational database (`mysqlclient` driver)
+- **Tailwind CSS v4** — styling and design system
+- **HTMX** — asynchronous interface updates
+- **Alpine.js** — lightweight client-side interactions
+- **Vazirmatn** — Persian typeface
+- **WhiteNoise** — static-file serving
+- **jdatetime** — Jalali date support
+- **Pillow** — image processing and generated demo images
+- **Node.js and npm** — frontend asset building only
+- **Docker and Docker Compose** — containerized development and deployment
+- **Gunicorn** — production WSGI server
 
-| لایه | فناوری |
-| --- | --- |
-| Backend | Python 3.14، Django 6.1 |
-| ابزار مدیریت بسته | `uv` |
-| دیتابیس | MySQL / MariaDB (درایور `mysqlclient`) |
-| فرانت‌اند | Tailwind CSS v4، HTMX، Alpine.js |
-| فونت | وزیرمتن (Vazirmatn) |
-| Static | WhiteNoise |
-| تاریخ شمسی | `jdatetime` |
-| تصاویر | Pillow |
-
-هیچ React، Next.js یا Node در Runtime استفاده نمی‌شود؛ Node فقط برای ساخت CSS و کپی فایل‌های Vendor است.
+React, Next.js, and Node.js are not used to serve the application at runtime. Node.js is only needed to build CSS and copy vendor assets.
 
 ---
+## 🚀 How It Works
 
-## راه‌اندازی سریع
+1. Customers browse products, categories, discounts, and available color/size variants.
+2. A customer adds items to a session-based guest cart or their authenticated cart.
+3. At checkout, the backend validates the selected variants and recalculates prices and totals using `Decimal`.
+4. The order service locks the relevant inventory rows and updates stock inside a database transaction to prevent concurrent purchases from overselling available items.
+5. The order stores a snapshot of the product name, selected variant, price, and shipping address as they were at checkout.
+6. The customer is redirected to the configured payment gateway. The application does not trust query parameters alone; payment status must be verified server-side.
+7. Payment callbacks are processed idempotently so repeated callbacks do not repeat payment processing or deduct inventory again.
+8. Unpaid orders can expire after the configured reservation period. The expiration command cancels eligible orders and releases their reserved stock.
+9. Administrators manage catalog data, discounts, customers, transactions, and order-status transitions through Django's administration interface.
 
-پیش‌نیازها: **Python 3.14**، **`uv`**، **Node.js**، **MySQL 8+ یا MariaDB 10.6+**.
+---
+## ⚙️ Installation
+
+### Prerequisites
+
+- Python 3.14
+- [`uv`](https://docs.astral.sh/uv/)
+- Node.js and npm
+- MySQL 8+ or MariaDB 10.6+
+
+### 1. Clone the repository
 
 ```bash
-# ۱) نصب وابستگی‌های Python
+git clone https://github.com/your-username/your-repository.git
+cd your-repository
+```
+
+Replace the example repository URL with the URL of your GitHub repository.
+
+---
+
+### 2. Install Python dependencies and configure the environment
+
+```bash
 uv sync
-
-# ۲) ساخت فایل پیکربندی
 cp .env.example .env
-# سپس مقادیر واقعی را در .env قرار دهید
+```
 
-# ۳) ساخت دیتابیس و کاربر
+Open `.env` and set the values required by your local environment. In particular, do not leave required secrets such as `SECRET_KEY`, `PAYMENT_SECRET`, or `DATABASE_PASSWORD` empty or set to example values.
+
+---
+
+### 3. Create the database
+
+```bash
 bash scripts/mysql_dev.sh
+```
 
-# ۴) اعمال Migration
+This development helper creates the database, database user, and required MySQL time-zone data. Its defaults are documented in the [Database Setup](#-database-setup-and-phpmyadmin) section below.
+
+---
+
+### 4. Apply migrations and build frontend assets
+
+```bash
 uv run python manage.py migrate
-
-# ۵) ساخت فایل‌های CSS/JS
 npm install
 npm run build
+```
 
-# ۶) داده‌های نمونه (اختیاری اما توصیه‌شده)
+---
+
+### 5. Load optional demo data
+
+```bash
 uv run python manage.py seed_demo_data
+```
 
-# ۷) اجرا
+This creates example categories, products, variants, discounts, users, and orders. The command also creates a development-only administrator account; see [Demo Data](#-demo-data) before using it.
+
+---
+
+### 6. Start the development server
+
+```bash
 uv run python manage.py runserver
 ```
 
-فروشگاه روی <http://127.0.0.1:8000/> و پنل مدیریت روی <http://127.0.0.1:8000/admin/> در دسترس است.
+The storefront will be available at <http://127.0.0.1:8000/> and the Django administration panel at <http://127.0.0.1:8000/admin/>.
 
-> **نکته درباره‌ی PyPI:** اگر دسترسی به `pypi.org` مسدود است، از آینه استفاده کنید:
+> **Package index note:** If `pypi.org` is inaccessible on your network, configure an accessible package index before running `uv sync`. For example:
+>
 > ```bash
 > export UV_DEFAULT_INDEX="https://pypi.tuna.tsinghua.edu.cn/simple"
 > export UV_LINK_MODE=copy
 > uv sync
 > ```
+>
+> Use a package index you trust and that is appropriate for your environment.
 
 ---
+## 📸 Output Example
 
-## اجرا با Docker (پیشنهادی)
+After starting the application, you can open these pages locally:
 
-کل پروژه به‌همراه **تمام پیش‌نیازها** (Python 3.14، Node، MariaDB، Tailwind، Gunicorn)
-داکرایز شده است. با یک دستور بالا می‌آید و برای انتقال به هاست اصلی هم همین روش کافی است.
+- **Storefront:** <http://127.0.0.1:8000/>
+- **Administration panel:** <http://127.0.0.1:8000/admin/>
+- **Phone-number sign-in:** <http://127.0.0.1:8000/accounts/login/>
 
-### پیش‌نیاز
+With `SMS_PROVIDER=console`, development OTP messages are printed to the server terminal. After signing in, users can browse products, choose variants, manage their cart, and proceed through checkout using the configured payment gateway.
 
-- Docker Engine 24+ و Docker Compose v2
-- دسترسی اجرا به کاربر `docker` (یا `sudo`)
+---
+## ❗ Notes
+
+- The interface is Persian and RTL by design.
+- The mock payment gateway is for development only. It works with `DEBUG=True` and is disabled when `DEBUG=False`.
+- With the default `SMS_PROVIDER=console`, OTP codes are printed to the server terminal rather than sent as real SMS messages.
+- Demo account credentials and demo database passwords are for local development only. Change or remove them before exposing any deployment to a network.
+- Keep real secrets in environment variables. Never commit your real `.env` file, payment credentials, or production database password.
+- A real payment gateway requires a provider implementation and valid merchant credentials. Do not treat a successful browser redirect as proof of payment; always verify the transaction on the server.
+- Tailwind CSS v4 custom utilities should be declared with `@utility`; the source stylesheet is `assets/css/app.css`.
+- The project uses Python `Decimal` for monetary calculations to avoid floating-point rounding issues.
+
+---
+## 🐳 Docker Setup
+
+Docker is available for running the application with MariaDB and the required runtime/build dependencies.
+
+### Prerequisites
+
+- Docker Engine 24 or later
+- Docker Compose v2
+
+Check your installation:
 
 ```bash
 docker --version
 docker compose version
 ```
 
-### راه‌اندازی (توسعه — با Hot-Reload)
+### Development setup
 
-> **نکته:** `docker compose` به‌طور خودکار همان فایل `.env` پروژه را می‌خواند؛
-> پس نیازی به ساخت فایل جدید نیست و **هرگز `.env` واقعی را بازنویسی نکنید**.
-> فقط یک بار مطمئن شوید این سه مقدار پُر هستند:
+Docker Compose reads the project's `.env` file. If it does not exist, create it from `.env.example` and replace all example values before starting the application.
 
 ```bash
-# بررسی مقادیر الزامی (باید خالی یا change-me نباشند)
-grep -E "^(SECRET_KEY|PAYMENT_SECRET|DATABASE_PASSWORD)=" .env
-
-# اگر لازم بود ویرایش کنید
-nano .env
+cp .env.example .env
 ```
 
-> اگر `.env` را ندارید، از `.env.example` یک نسخه بگیرید و **همه‌ی مقادیر `change-me`
-> را با مقدار واقعی عوض کنید**؛ وگرنه هم Django و هم Docker با خطای
-> `Access denied for user 'shop'@'localhost'` متوقف می‌شوند.
-> فایل `.docker.env.example` فقط **مرجع** است و نباید روی `.env` نوشته شود.
+Check the required settings:
 
 ```bash
-# بالا آوردن کل سرویس‌ها
-docker compose up -d --build
+grep -E "^(SECRET_KEY|PAYMENT_SECRET|DATABASE_PASSWORD)=" .env
+```
 
-# (اختیاری) ساخت داده‌های نمونه
+Start the development services:
+
+```bash
+docker compose up -d --build
+```
+
+Optionally load demo data:
+
+```bash
 docker compose exec web python manage.py seed_demo_data
 ```
 
-سرویس‌ها:
+The development Compose override uses Django's development server and hot reloading. Do not use the development configuration as a public production deployment.
 
-| سرویس | توضیح | آدرس |
+### Docker services
+
+| Service | Purpose | Local address |
 | --- | --- | --- |
-| `web` | Django + `runserver` (توسعه) | <http://localhost:8000/> |
-| `db` | MariaDB 11.4 با Volume دائمی | `localhost:3307` |
-| `phpmyadmin` | فقط با `--profile tools` | <http://localhost:8080/> |
+| `web` | Django development server | <http://localhost:8000/> |
+| `db` | MariaDB 11.4 with a persistent volume | `localhost:3307` |
+| `phpmyadmin` | Optional database administration tool | <http://localhost:8080/> |
+
+Start phpMyAdmin with its Compose profile:
 
 ```bash
-docker compose ps                  # وضعیت سرویس‌ها
-docker compose logs -f web         # لاگ وب
-docker compose logs -f db          # لاگ دیتابیس
-docker compose --profile tools up -d phpmyadmin   # phpMyAdmin
+docker compose --profile tools up -d phpmyadmin
 ```
 
-### اجرای دستورهای مدیریتی
+Useful service commands:
+
+```bash
+docker compose ps
+docker compose logs -f web
+docker compose logs -f db
+```
+
+### Django management commands in Docker
 
 ```bash
 docker compose exec web python manage.py migrate
@@ -200,151 +244,119 @@ docker compose exec web python manage.py createsuperuser
 docker compose exec web python manage.py shell
 ```
 
-### استقرار Production با Docker
+### Docker production configuration
+
+The base `docker-compose.yml` is intended for production; the development override is omitted when you explicitly specify the base file:
 
 ```bash
-# حالت Production از فایل docker-compose.yml استفاده می‌کند
-# (بدون Override: Gunicorn به‌جای runserver، و DJANGO_SETTINGS_MODULE=production)
 docker compose -f docker-compose.yml build
 docker compose -f docker-compose.yml up -d
-
-# ساخت ابرکاربر
 docker compose -f docker-compose.yml exec web python manage.py createsuperuser
 ```
 
-نکات مهم Production:
+Important production settings include:
 
-| متغیر | مقدار پیش‌فرض | توضیح |
+| Variable | Expected configuration | Purpose |
 | --- | --- | --- |
-| `DJANGO_SETTINGS_MODULE` | `config.settings.production` | در فایل اصلی قاطع ست شده؛ `check --deploy` بدون هشدار |
-| `SECRET_KEY` / `PAYMENT_SECRET` / `DATABASE_PASSWORD` | **الزامی** | بدون آن‌ها اجرا نمی‌شود |
-| `SECURE_SSL_REDIRECT` | `True` | اگر Reverse-Proxy ندارید `False` کنید |
-| `SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` | `True` | فقط با HTTPS |
-| `ALLOWED_HOSTS` / `CSRF_TRUSTED_ORIGINS` | دامنه‌ی واقعی | با `https://` |
-| `MIGRATE_ON_START` | `1` | اگر Migration را جداگانه اجرا می‌کنید `0` |
+| `DJANGO_SETTINGS_MODULE` | `config.settings.production` | Loads production settings |
+| `SECRET_KEY` | Required, strong random value | Django signing and security |
+| `PAYMENT_SECRET` | Required, strong random value | Payment request/callback signing |
+| `DATABASE_PASSWORD` | Required, strong password | Database authentication |
+| `ALLOWED_HOSTS` | Your real domain | Allowed host names |
+| `CSRF_TRUSTED_ORIGINS` | Full origins, including `https://` | CSRF protection behind the domain |
+| `SECURE_SSL_REDIRECT` | `True` when HTTPS is configured | Redirects HTTP requests to HTTPS |
+| `SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` | `True` when HTTPS is configured | Sends cookies only over HTTPS |
+| `MIGRATE_ON_START` | `1` by default | Runs migrations during startup when enabled |
 
-> ⚠️ اگر پشت **Nginx/Caddy با HTTPS** هستید، `X-Forwarded-Proto` را حتماً پاس دهید؛
-> در غیر این صورت `SECURE_SSL_REDIRECT` باعث حلقه‌ی Redirect می‌شود.
+If Nginx or Caddy terminates HTTPS in front of the application, configure the reverse proxy to forward the original scheme correctly. Otherwise, `SECURE_SSL_REDIRECT` can cause redirect loops. Review the proxy and Django security settings together before deployment.
 
-### ساختار فایل‌های Docker
+### Docker-related files
 
+```text
+Dockerfile
+ docker-compose.yml
+ docker-compose.override.yml
+ .dockerignore
+ .docker.env.example
+ docker/
+ ├── entrypoint.sh
+ └── db/
+     ├── init/01-load-timezones.sh
+     └── conf.d/shop.cnf
 ```
-Dockerfile                  # سه مرحله: assets (Node) → builder (uv) → runtime
-docker-compose.yml          # Production: web + db
-docker-compose.override.yml # توسعه: Hot-Reload، runserver، DEBUG=True
-.dockerignore
-.docker.env.example         # نمونه پیکربندی Docker Compose
-docker/
-├── entrypoint.sh           # انتظار برای DB → collectstatic → migrate → اجرا
-└── db/
-    ├── init/01-load-timezones.sh   # بارگذاری جدول‌های Timezone (لازم برای date_hierarchy)
-    └── conf.d/shop.cnf             # utf8mb4 + READ-COMMITTED + InnoDB
-```
 
-### مهاجرت از محیط محلی به Docker
+The entrypoint waits for the database, collects static files, runs configured startup tasks, and launches the application. The database configuration enables `utf8mb4`, `READ-COMMITTED`, and InnoDB settings.
+
+### Moving a local database into Docker
+
+Back up the local database first:
 
 ```bash
-# بکاپ‌گیری از دیتابیس محلی
 mysqldump -h 127.0.0.1 -u shop -p clothing_shop > backup.sql
+```
 
-# ورود به کانتینر دیتابیس و ورود داده‌ها
-docker compose exec -T db mariadb -u root -p"your-root-pass" clothing_shop < backup.sql
+Import the backup into the container, substituting your configured database credentials:
 
-# انتقال تصاویر آپلودشده
+```bash
+docker compose exec -T db mariadb -u root -p clothing_shop < backup.sql
+```
+
+Copy uploaded media files when applicable:
+
+```bash
 docker compose cp media/. web:/app/media/
 ```
 
-### عیب‌یابی Docker
-
-| مشکل | علت | راه‌حل |
-| --- | --- | --- |
-| `کلید SECRET_KEY تنظیم نشده است` | `.env` خالی است | مقادیر الزامی را پر کنید |
-| `entrpoint: اتصال به دیتابیس ناموفق بود` | `DATABASE_HOST` نادرست | باید دقیقاً `db` باشد |
-| خطای مجوز روی `media/` | مالک ریشه است | `sudo chown -R $USER:$USER media logs` |
-| `port is already allocated` | پورت 8000/3307 اشغال است | `WEB_PORT`/`DB_PORT` را در `.env` عوض کنید |
-| CSS قدیمی نمایش داده می‌شود | فایل‌های static کهنه‌اند | `docker compose build --no-cache web` |
-| `mounts denied: ... is not shared from the host` | مسیر پروژه در File Sharing Docker Desktop نیست (معمولاً وقتی روی درایو خارجی/NTFS است) | Docker Desktop → Settings → Resources → **File Sharing** → مسیر پروژه را اضافه کنید → Apply & Restart |
-| `stat /app/docker/entrypoint.sh: no such file` | کانتینر قبل از اصلاح File Sharing ساخته شده و Mount ناقص مانده است | `docker compose up -d --force-recreate web` |
-| `TLS handshake timeout` هنگام کشیدن `ghcr.io/astral-sh/uv` | دسترسی به GHCR در برخی شبکه‌ها ناپایدار است | **رفع شده:** uv اکنون با pip از PyPI نصب می‌شود؛ در صورت تکرار، `docker compose build --no-cache` |
-| `Unable to locate package default-libmysqlclient-runtime` | نام پکیج اشتباه بود | **رفع شده:** از `libmariadb3` استفاده می‌شود |
+> The import command will prompt for a password where supported by the client. Do not place real passwords directly in shell history or public documentation.
 
 ---
+## 🗄️ Database Setup and phpMyAdmin
 
-## ساخت دیتابیس و اتصال phpMyAdmin
+### Automatic database setup
 
-### ساخت خودکار
-
-اسکریپت زیر دیتابیس، کاربر و جدول‌های Timezone را می‌سازد:
+Run the helper script in a local development environment:
 
 ```bash
 bash scripts/mysql_dev.sh
 ```
 
-با مقادیر پیش‌فرض:
+Its documented defaults are:
 
-| مقدار | مقدار |
+| Setting | Development default |
 | --- | --- |
-| نام دیتابیس | `clothing_shop` |
-| کاربر | `shop` |
-| رمز | `shop_secret_2026` |
-| هاست | `127.0.0.1:3306` |
+| Database name | `clothing_shop` |
+| Database user | `shop` |
+| Database password | `shop_secret_2026` — development only |
+| Host and port | `127.0.0.1:3306` |
 
-هر کدام با متغیرهای `DATABASE_NAME`، `DATABASE_USER`، `DATABASE_PASSWORD`، `DATABASE_HOST` و `DATABASE_PORT` قابل تغییر است.
+You can override these values with `DATABASE_NAME`, `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_HOST`, and `DATABASE_PORT`. Do not reuse the documented development password in production.
 
-### ساخت دستی
+### Manual database creation
+
+The following is an example for a local development database. Replace the password with a strong local value and keep it consistent with `.env`:
 
 ```sql
 CREATE DATABASE clothing_shop
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-CREATE USER 'shop'@'127.0.0.1' IDENTIFIED BY 'shop_secret_2026';
+CREATE USER 'shop'@'127.0.0.1' IDENTIFIED BY '<strong-development-password>';
 GRANT ALL PRIVILEGES ON clothing_shop.* TO 'shop'@'127.0.0.1';
 FLUSH PRIVILEGES;
 ```
 
-### اتصال به phpMyAdmin
+### Connect with Docker phpMyAdmin
 
-> ### ⚠️ هشدار مهم درباره‌ی پورت 3306
->
-> اجرای دستور `/opt/lampp/lampp start` سرویس **MariaDB خودِ XAMPP** را روی پورت `3306`
-> بالا می‌آورد و جای دیتابیس پروژه را می‌گیرد. در این حالت Django با خطای زیر مواجه می‌شود:
->
-> ```
-> MySQLdb.OperationalError: (1045, "Access denied for user 'shop'@'localhost'")
-> ```
->
-> چون کاربر `shop` در دیتابیس XAMPP وجود ندارد. **راه‌حل‌ها:**
->
-> - **(پیشنهادی)** از phpMyAdmin داکر استفاده کنید (بخش زیر) و اصلاً LAMPP را اجرا نکنید.
-> - یا پورت MySQL داخل XAMPP را عوض کنید: در `/opt/lampp/etc/my.cnf` مقدار `port=3306`
->   را به `port=3308` تغییر دهید و سپس `/opt/lampp/lampp start` را اجرا کنید.
->   (عمداً `3308` و نه `3307`، چون `3307` پیش‌فرض پورت دیتابیس Docker است.)
-> - یا فقط Apache را بالا بیاورید و MySQL آن را خاموش نگه دارید:
->   ```bash
->   /opt/lampp/lampp startapache      # فقط وب‌سرور
->   /opt/lampp/lampp stopmysql        # دیتابیس XAMPP خاموش بماند
->   ```
->
-> برای تشخیص اینکه چه کسی پورت 3306 را گرفته:
-> ```bash
-> ss -ltnp | grep 3306
-> ```
-
-#### گزینه ۱ — phpMyAdmin با Docker (پیشنهادی)
-
-کانینر phpMyAdmin از قبل در `docker-compose.yml` تعریف شده و با `profile` فعال می‌شود؛
-**بدون اینکه پورت 3306 دیتابیس پروژه را بشکند**:
+Start the service and open <http://localhost:8080/>:
 
 ```bash
 docker compose --profile tools up -d phpmyadmin
 ```
 
-سپس <http://localhost:8080/> را باز کنید و با کاربر `shop` و رمز آن وارد شوید.
+Sign in using the database host and credentials configured for your Compose setup.
 
-#### گزینه ۲ — phpMyAdmin دستی (بدون LAMPP)
+### Local phpMyAdmin configuration
 
-اگر phpMyAdmin را خودتان نصب کرده‌اید، فقط کافی است هاست را `127.0.0.1` بگذارید
-(نباید `localhost` باشد تا به‌جای سوکتِ XAMPP، از TCP استفاده شود):
+If you run phpMyAdmin locally, use `127.0.0.1` as the host when you need a TCP connection to the local MySQL/MariaDB service:
 
 ```php
 $i = 0;
@@ -356,86 +368,90 @@ $cfg['Servers'][$i]['AllowNoPassword'] = false;
 $cfg['Servers'][$i]['hide_db'] = '^(information_schema|performance_schema|mysql|sys)$';
 ```
 
-> phpMyAdmin از سوکت MySQL هم پشتیبانی می‌کند؛ اگر سرور MySQL شما فقط با سوکت در دسترس است،
-> در فیلد Host مسیر سوکت را بگذارید: `/var/run/mysqld/mysqld.sock`
->
-> ⚠️ هرگز مسیر سوکتِ XAMPP (مثل `/opt/lampp/var/mysql/mysql.sock`) را وارد نکنید؛
-> دیتابیس پروژه روی آن سوکت نیست.
+A local MySQL installation may also be accessed over its configured Unix socket, for example `/var/run/mysqld/mysqld.sock`. Use the socket path belonging to the database instance that actually hosts this project's database.
 
----
+### Port 3306 conflicts with XAMPP/LAMPP
 
-## اجرای پروژه
+On Linux, starting XAMPP/LAMPP may start its own MariaDB service on port `3306`. Django can then connect to the wrong database instance and report an authentication error for the `shop` user.
 
-همه‌ی دستورات با `uv` اجرا می‌شوند:
+Check which process is listening on that port:
 
 ```bash
-uv run python manage.py runserver          # سرور توسعه
-uv run python manage.py migrate            # اعمال Migration
-uv run python manage.py makemigrations     # ساخت Migration جدید
-uv run python manage.py check              # بررسی سلامت پیکربندی
-uv run python manage.py collectstatic      # جمع‌آوری Static (Production)
-uv run python manage.py shell              # Shell تعاملی
+ss -ltnp | grep 3306
 ```
 
----
+Possible solutions are to use the Docker database and phpMyAdmin, configure XAMPP's MySQL/MariaDB to use a different port such as `3308`, or start only XAMPP's web server while leaving its database stopped. Make sure the database address in `.env` points to the intended service.
 
-## داده‌های نمونه
+---
+## 📦 Demo Data
+
+Populate the development database with sample content:
 
 ```bash
 uv run python manage.py seed_demo_data
 ```
 
-این دستور می‌سازد:
+The command creates:
 
-- ۱۳ دسته‌بندی (با ساختار سلسله‌مراتبی)
-- ۸ رنگ و ۹ سایز
-- ۱۶ محصول واقعی با چند واریانت و تصاویر Placeholder تولیدشده با Pillow
-- ۵ تخفیف فعال
-- سوپروزر: شماره `09120000000`، رمز `admin1234`
-- کاربر نمونه: شماره `09120000001`
-- دو سفارش نمونه (یکی پرداخت‌شده، یکی در انتظار پرداخت)
+- 13 categories in a hierarchy
+- 8 colors and 9 sizes
+- 16 sample products with multiple variants and placeholder images generated with Pillow
+- 5 active discounts
+- A sample administrator account: phone number `09120000000`, password `admin1234`
+- A sample customer account: phone number `09120000001`
+- 2 sample orders: one paid and one awaiting payment
 
-برای پاک‌سازی کامل و شروع دوباره:
+The listed credentials are development defaults only. Change or remove them before deploying, and do not use them for any real account.
+
+To clear the database and reseed it from scratch, run the following command **only if you intend to delete all data in the configured database**:
 
 ```bash
 uv run python manage.py flush
 uv run python manage.py seed_demo_data
 ```
 
-### ورود به حساب کاربری
-
-۱. به `/accounts/login/` بروید و شماره را وارد کنید.
-۲. کد OTP در **کنسول سرور** چاپ می‌شود (Provider پیامک از نوع `console`).
-۳. کد را در صفحه‌ی تأیید وارد کنید.
+When `SMS_PROVIDER=console`, sign in at `/accounts/login/` and retrieve the one-time code from the server terminal.
 
 ---
+## 🧪 Tests
 
-## تست‌ها
+Run the Django test suite with:
 
 ```bash
-uv run python manage.py test                     # همه تست‌ها
-uv run python manage.py test products            # فقط یک اپ
-uv run python manage.py test payments.tests.CallbackTests   # یک کلاس
-uv run python manage.py test --keepdb            # بدون ساخت دیتابیس آزمایشی جدید
+uv run python manage.py test
 ```
 
-تست‌ها روی دیتابیس آزمایشی جداگانه‌ای به نام `test_clothing_shop` اجرا می‌شوند و داده‌های اصلی شما دست نمی‌خورند.
+Run specific apps or test classes:
 
-پوشش **۲۰۸ تست** در ۷ اپ: اعتبارسنجی‌ها، Rate Limiter، سناریوهای OTP (کد درست، غلط، منقضی، قفل تلاش، ارقام فارسی)، قیمت‌گذاری (درصدی، ثابت، منقضی، سقف)، جلوگیری از Overselling، Snapshot سفارش، لغو و انقضا، امضا و Verify درگاه، Idempotency Callback و سناریوی کامل خرید سرانجام‌به‌سرانجام.
+```bash
+uv run python manage.py test products
+uv run python manage.py test payments.tests.CallbackTests
+uv run python manage.py test --keepdb
+```
+
+The project documentation reports **208 tests across 7 apps**, covering validation, rate limiting, OTP scenarios, pricing rules, overselling protection, order snapshots, cancellation and expiration, gateway signing and verification, idempotent callbacks, and end-to-end purchase flows.
+
+Tests use a separate database named `test_clothing_shop`. Ensure the database account used for local testing has the permissions required for that test database. Avoid granting broad global database privileges to production accounts merely to make tests pass.
 
 ---
+## 🎨 Building CSS and JavaScript Assets
 
-## ساخت فایل‌های CSS/JS
+Install frontend dependencies and build the static assets:
 
 ```bash
-npm install          # فقط یک بار
-npm run build        # ساخت app.css + کپی htmx/alpine/فونت‌ها
-npm run watch        # ساخت ممتد هنگام توسعه
+npm install
+npm run build
 ```
 
-خروجی در `static/` قرار می‌گیرد:
+During frontend development, rebuild assets automatically when files change:
 
+```bash
+npm run watch
 ```
+
+The generated files are placed under `static/`:
+
+```text
 static/
 ├── css/app.css
 ├── vendor/htmx.min.js
@@ -443,21 +459,26 @@ static/
 └── fonts/Vazirmatn-*.woff2
 ```
 
-**نکته:** کلاس‌های سفارشی در Tailwind v4 باید با `@utility` تعریف شوند، نه `@layer components`. فایل منبع `assets/css/app.css` است.
+The main CSS source file is `assets/css/app.css`. In Tailwind CSS v4, custom utilities should be declared with `@utility` rather than `@layer components`.
 
 ---
+## 📱 SMS Provider Configuration
 
-## پیکربندی پیامک
+SMS delivery is abstracted behind a provider interface. The OTP authentication flow does not need to depend on a specific SMS vendor.
 
-ارسال پیامک پشت یک Interface قرار دارد؛ هسته‌ی OTP هیچ وابستگی‌ای به Provider خاصی ندارد.
+Configure the provider in `.env`:
 
 ```env
-SMS_PROVIDER=console          # توسعه: کد در کنسول چاپ می‌شود
-# SMS_PROVIDER=memory         # تست: پیامک‌ها در حافظه نگه داشته می‌شوند
-# SMS_PROVIDER=myapp.sms.KavenegarProvider   # سرویس واقعی
+SMS_PROVIDER=console
+# SMS_PROVIDER=memory
+# SMS_PROVIDER=myapp.sms.KavenegarProvider
 ```
 
-تنظیمات مرتبط:
+- `console` prints OTP messages to the development server terminal.
+- `memory` is intended for tests or in-memory development scenarios.
+- A custom provider path can be configured for a real SMS service.
+
+Related OTP settings:
 
 ```env
 OTP_LENGTH=5
@@ -467,9 +488,9 @@ OTP_RESEND_SECONDS=90
 OTP_RESEND_LIMIT_PER_HOUR=5
 ```
 
-### افزودن سرویس پیامک واقعی
+### Add a real SMS provider
 
-کافی است یک کلاس با همین Interface بسازید و نام آن را در `SMS_PROVIDER` قرار دهید؛ نیازی به تغییر هسته‌ی احراز هویت نیست.
+Create a class that implements the project's `SMSProvider` interface, then set `SMS_PROVIDER` to its Python import path. For example:
 
 ```python
 # myapp/sms.py
@@ -480,15 +501,16 @@ class KavenegarProvider(SMSProvider):
     name = "kavenegar"
 
     def send(self, phone_number: str, message: str) -> None:
-        # فراخوانی HTTP به API کاوه‌نگار
+        # Call the SMS provider's HTTP API here.
         ...
 ```
 
-اگر مسیر کلاس اشتباه باشد، به‌جای خطای 500 پیام روشن «ارائه‌دهنده پیامک پیدا نشد» نمایش داده می‌شود.
+The example above is a template, not a complete provider integration. Add real API handling, error handling, and credential configuration before using a provider in production. An invalid import path should be handled with a clear provider-configuration error.
 
 ---
+## 💳 Payment Gateway Configuration
 
-## پیکربندی درگاه پرداخت
+The default development configuration uses the mock gateway:
 
 ```env
 PAYMENT_GATEWAY=mock
@@ -496,9 +518,11 @@ PAYMENT_SECRET=change-me-to-a-long-random-string
 ORDER_RESERVATION_MINUTES=30
 ```
 
-> درگاه Mock فقط وقتی `DEBUG=True` است کار می‌کند. با `DEBUG=False` به‌طور خودکار غیرفعال می‌شود.
+Replace the example `PAYMENT_SECRET` with a strong random value in your local environment. The mock gateway is available only when `DEBUG=True` and is automatically disabled with `DEBUG=False`.
 
-### افزودن درگاه واقعی
+### Add a real payment gateway
+
+Implement the `PaymentGateway` interface and configure `PAYMENT_GATEWAY` to point to your provider class. The following is a structural example, not a complete integration with a payment provider:
 
 ```python
 # payments/gateways/zarinpal.py
@@ -515,40 +539,46 @@ class ZarinpalGateway(PaymentGateway):
         ...
 ```
 
+Example environment configuration:
+
 ```env
 PAYMENT_GATEWAY=payments.gateways.zarinpal.ZarinpalGateway
 PAYMENT_MERCHANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-PAYMENT_SECRET=یک رشته تصادفی بلند
+PAYMENT_SECRET=<long-random-secret>
 ```
 
-**قوانینی که باید رعایت شود:**
+Any real gateway implementation must follow these rules:
 
-- مبلغ تراکنش فقط از `order.total` خوانده شود، هرگز از Client
-- Verify سمت سرور انجام شود؛ Query به‌تنهایی کافی نیست
-- `process_callback` ایدمپوتنت است؛ پردازش مجدد اثری ندارد
-- هیچ اطلاعات کارتی ذخیره نشود
+- Read the transaction amount from `order.total`; never trust an amount supplied by the client.
+- Verify payment on the server with the payment provider. Query parameters alone are not proof of payment.
+- Keep callback processing idempotent so repeated callbacks cannot cause repeated side effects.
+- Do not store or process card details in this application.
+- Store merchant credentials and signing secrets only in environment variables or a secure secrets manager.
 
 ---
+## 🚀 Production Deployment
 
-## استقرار Production
+Production deployment requires a valid secret configuration, a production database, HTTPS, static-file collection, a production application server, and a scheduled task for expiring unpaid orders.
 
-### ۱) پیکربندی
+### 1. Configure environment variables
 
 ```bash
 cp .env.example .env
 ```
 
+Set production values in `.env` (the values below are examples and must be adapted to your host):
+
 ```env
 DJANGO_SETTINGS_MODULE=config.settings.production
 DEBUG=False
-SECRET_KEY=<یک کلید تصادفی حداقل ۵۰ کاراکتری>
+SECRET_KEY=<strong-random-secret-at-least-50-characters>
 ALLOWED_HOSTS=shop.example.com
 CSRF_TRUSTED_ORIGINS=https://shop.example.com
 
-DATABASE_PASSWORD=<رمز قوی>
+DATABASE_PASSWORD=<strong-database-password>
 
 PAYMENT_GATEWAY=payments.gateways.zarinpal.ZarinpalGateway
-PAYMENT_SECRET=<یک رشته تصادفی بلند>
+PAYMENT_SECRET=<long-random-secret>
 
 SESSION_COOKIE_SECURE=True
 CSRF_COOKIE_SECURE=True
@@ -556,47 +586,56 @@ SECURE_SSL_REDIRECT=True
 SECURE_HSTS_SECONDS=31536000
 ```
 
-`config/settings/production.py` در صورت ضعیف‌بودن `SECRET_KEY`، خالی‌بودن `ALLOWED_HOSTS` یا تنظیم‌نشدن رمز دیتابیس، بالا آمدن را متوقف می‌کند.
+The production settings are designed to refuse startup when critical values such as `SECRET_KEY`, `ALLOWED_HOSTS`, or the database password are missing or weak.
 
-### ۲) دیتابیس
+### 2. Create a restricted database user
+
+Use a dedicated account with permissions limited to this application's database. Adapt the host, database, and password to your environment:
 
 ```sql
--- کاربر اختصاصیِ فقط برای این پروژه
-CREATE USER 'shop_prod'@'127.0.0.1' IDENTIFIED BY '<رمز قوی>';
+CREATE USER 'shop_prod'@'127.0.0.1' IDENTIFIED BY '<strong-password>';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER
   ON clothing_shop.* TO 'shop_prod'@'127.0.0.1';
 FLUSH PRIVILEGES;
 ```
 
-> در Production هرگز دسترسی `ALL ON *.*` ندهید. دسترسی سراسری فقط برای محیط توسعه است تا بتواند دیتابیس آزمایشی تست‌ها را بسازد.
+Do not grant `ALL ON *.*` to an application account in production. If your deployment runs tests, provision a separate test database and grant only the permissions needed for that database to a separate testing account.
+
+Apply migrations and collect static files:
 
 ```bash
 uv run python manage.py migrate
 uv run python manage.py collectstatic --noinput
 ```
 
-### ۳) زمان‌بندی انقضای سفارش‌ها
+### 3. Schedule unpaid-order expiration
 
-سفارش‌های پرداخت‌نشده باید دوره‌ای لغو و موجودی‌شان آزاد شود:
+Unpaid orders should be expired periodically so their reserved stock can be released. For example, run the command every five minutes using cron, adjusting the paths for your deployment:
 
-```bash
+```cron
 */5 * * * * cd /path/to/shop && /path/to/.venv/bin/python manage.py expire_pending_orders
 ```
 
-### ۴) سرو با Gunicorn
+### 4. Run Gunicorn
+
+Install the production dependencies and start the WSGI application:
 
 ```bash
 uv sync --extra production
 uv run gunicorn config.wsgi:application --workers 3 --bind 127.0.0.1:8000
 ```
 
-یا ASGI:
+For an ASGI deployment, the project documentation provides this alternative:
 
 ```bash
 uv run gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker --bind 127.0.0.1:8000
 ```
 
-### ۵) Nginx (پشتیبان Reverse-Proxy)
+Use the server type and worker configuration appropriate for the final deployment. Keep the application server bound to a private interface when it is intended to sit behind a reverse proxy.
+
+### 5. Nginx reverse proxy example
+
+This example redirects HTTP to HTTPS and proxies requests to Gunicorn. Update the domain, certificate paths, and filesystem paths before using it:
 
 ```nginx
 server {
@@ -612,7 +651,7 @@ server {
     ssl_certificate     /etc/letsencrypt/live/shop.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/shop.example.com/privkey.pem;
 
-    client_max_body_size 20m;   # آپلود تصاویر
+    client_max_body_size 20m;
 
     location /static/ {
         alias /path/to/shop/staticfiles/;
@@ -635,11 +674,11 @@ server {
 }
 ```
 
-> `X-Forwarded-For` لازم است تا Rate Limiting مبتنی بر IP درست کار کند.
+Forwarding `X-Forwarded-For` is important for IP-based rate limiting. Configure Django's proxy/secure settings to match the reverse proxy and trust only headers from a proxy you control.
 
-### ۶) Cache برای چند-پردازشی
+### 6. Use a shared cache with multiple workers
 
-با چند Worker، شمارنده‌های Rate Limit باید مشترک باشند:
+A local-memory cache is separate for each worker process. With multiple workers, rate-limit counts may therefore be inconsistent unless a shared cache is configured. The project documentation suggests Redis:
 
 ```bash
 uv add django-redis
@@ -649,47 +688,52 @@ uv add django-redis
 CACHE_URL=redis://127.0.0.1:6379/1
 ```
 
-بدون Redis، `LocMemCache` برای هر Worker جداگانه شمارش می‌کند و سقف درخواست‌ها چند برابر می‌شود.
+Confirm that the project's settings read `CACHE_URL` and that Redis is configured and protected before relying on it in production.
 
 ---
+## 🛠️ Troubleshooting
 
-## عیب‌یابی
-
-| مشکل | راه‌حل |
+| Problem | Suggested solution |
 | --- | --- |
-| `django.db.utils.OperationalError: Can't connect` | MySQL/MariaDB در حال اجراست؟ `DATABASE_HOST` و `DATABASE_PORT` درست‌اند؟ |
-| `Access denied; you need (at least one of) the CREATE privilege(s)` | هنگام اجرای تست‌ها دسترسی ساخت دیتابیس لازم است. در توسعه `GRANT ALL PRIVILEGES ON *.*` و در Production یک دیتابیس آزمایشی جداگانه بسازید. |
-| `Database returned an invalid datetime value` | جدول‌های Timezone دیتابیس خالی‌اند. `bash scripts/mysql_dev.sh` را اجرا کنید یا `mysql_tzinfo_to_sql /usr/share/zoneinfo \| mysql mysql` را دستی اجرا کنید. |
-| صفحه‌ی محصول CSS ندارد | `npm install && npm run build` را اجرا کنید. |
-| کد OTP چاپ نمی‌شود | `SMS_PROVIDER=console` در `.env` باشد و سرور را در ترمینال اجرا کنید نه در پس‌زمینه. |
-| `DisallowedHost: testserver` | تست‌ها را با `manage.py test` اجرا کنید نه اسکریپت دستی. |
-| درگاه Mock خطای «فقط در محیط Development» می‌دهد | `DEBUG=True` باشد. با `DEBUG=False` این درگاه عمداً غیرفعال است. |
-| دکمه‌ی «افزودن به سبد» غیرفعال است | رنگ و سایز را انتخاب کنید؛ محصول موجودی داشته باشد. |
-| `npm` دسترسی ندارد | `node_modules` را پاک کنید و دوباره `npm install` بزنید. |
+| `django.db.utils.OperationalError: Can't connect` | Confirm MySQL/MariaDB is running and check `DATABASE_HOST` and `DATABASE_PORT`. |
+| `Access denied` for the database user | Check the selected database instance, credentials, and grants. A local XAMPP database may be using port `3306` instead of the project's database. |
+| `Access denied` while creating the test database | Grant the local testing account the required permissions on the test database, or provision the test database separately. Avoid broad global grants in production. |
+| `Database returned an invalid datetime value` | MySQL time-zone tables may be missing. Run `bash scripts/mysql_dev.sh`, or load time-zone data using the database vendor's documented procedure. |
+| Product pages load without CSS | Run `npm install && npm run build`. |
+| OTP code is not printed | Check that `SMS_PROVIDER=console` is set and run the development server in a visible terminal. |
+| `DisallowedHost: testserver` | Run tests with `uv run python manage.py test`. |
+| The mock gateway says it is only available in development | Use `DEBUG=True` in development. The mock gateway is intentionally disabled when `DEBUG=False`. |
+| The Add to Cart button is unavailable | Select a color and size and confirm the selected variant is in stock. |
+| `npm` dependencies appear broken | Remove `node_modules` and reinstall with `npm install`. |
+| `port is already allocated` in Docker | Change the configured `WEB_PORT` or `DB_PORT` in `.env`, if supported by your Compose configuration. |
+| Docker reports a missing entrypoint or incomplete mount | Check file-sharing settings and mounts, then recreate the affected service. |
+| Docker cannot reach the database | In Compose, verify that `DATABASE_HOST` uses the database service name, usually `db`, rather than `localhost`. |
+| Old CSS persists in Docker | Rebuild the web image, for example with `docker compose build --no-cache web`. |
 
 ---
+## 📂 Project Structure
 
-## ساختار پروژه
-
+```text
+├── config/                  Django settings, URLs, WSGI, and ASGI configuration
+├── common/                  Validation, rate limiting, template filters, admin dashboard
+├── accounts/                Users, OTP, profiles, addresses, SMS providers
+├── products/                Products, categories, colors, sizes, variants, discounts, pricing
+├── cart/                    Shopping cart and related services
+├── orders/                  Orders, status transitions, shipping, expiration
+├── payments/                Gateways, transactions, and payment callbacks
+├── store/                   Storefront pages and demo data
+├── templates/               HTML templates
+├── assets/css/              Source CSS and design system
+├── static/                  Built static assets and vendor files
+├── scripts/                 Helper scripts
+├── docker/                  Docker entrypoint and database configuration
+├── Dockerfile               Container build configuration
+└── docker-compose.yml       Production Compose configuration
 ```
-├── config/                  پیکربندی (settings/urls/wsgi/asgi)
-├── common/                  اعتبارسنجی‌ها، Rate Limiter، فیلترهای قالب، داشبورد
-├── accounts/                کاربر، OTP، پروفایل، آدرس، Provider های پیامک
-├── products/                محصول، دسته‌بندی، رنگ، سایز، واریانت، تخفیف، قیمت‌گذاری
-├── cart/                    سبد خرید و سرویس‌های آن
-├── orders/                  سفارش، گذار وضعیت، ارسال، انقضا
-├── payments/                درگاه‌ها، تراکنش، Callback
-├── store/                   صفحات فروشگاه و داده‌های نمونه
-├── templates/               همه‌ی قالب‌ها
-├── assets/css/              منبع CSS (Design System)
-├── static/                  خروجی build
-└── scripts/                 اسکریپت‌های کمکی
-```
 
-جزئیات معماری در [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) آمده است.
+For more details about the internal design, see [`PROJECT_ARCHITECTURE.md`](PROJECT_ARCHITECTURE.md).
 
 ---
+## 📄 License
 
-## مجوز
-
-پروژه‌ی آموزشی و عملی. تمام حقوق محفوظ است.
+This project is described as an educational and practical project. No explicit open-source license is specified here. Unless a `LICENSE` file grants permissions, do not assume that the code is available for unrestricted reuse, modification, or redistribution.
