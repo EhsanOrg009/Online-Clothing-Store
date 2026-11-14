@@ -183,7 +183,7 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 # تمام Script های خارجی باید Nonce معتبر داشته باشند.
 SECURE_CSP = {
     "default-src": [CSP.SELF],
-    "img-src": [CSP.SELF, "data:", "blob:"],
+    "img-src": [CSP.SELF, "data:", "blob:", "https://trustseal.enamad.ir"],
     "style-src": [CSP.SELF, CSP.UNSAFE_INLINE],
     "script-src": [CSP.SELF, CSP.NONCE, CSP.UNSAFE_EVAL],
     "font-src": [CSP.SELF, "data:"],
