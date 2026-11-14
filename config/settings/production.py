@@ -45,8 +45,10 @@ if not ALLOWED_HOSTS:  # noqa: F405
 
 if env("DATABASE_PASSWORD", default="") in ("", "change-me"):  # noqa: F405
     raise RuntimeError("رمز عبور دیتابیس در Production تنظیم نشده است.")
-if PAYMENT_SECRET.startswith(("insecure", "change-me")) or len(PAYMENT_SECRET) < 50:
-    raise ImproperlyConfigured("PAYMENT_SECRET must contain at least 50 random characters.")
+if PAYMENT_GATEWAY not in ("zibal", "payments.gateways.zibal.ZibalGateway"):
+    raise ImproperlyConfigured("PAYMENT_GATEWAY must select Zibal in production.")
+if not ZIBAL_MERCHANT.strip() or ZIBAL_MERCHANT.strip() == "zibal":
+    raise ImproperlyConfigured("ZIBAL_MERCHANT must identify a real production merchant.")
 if "*" in ALLOWED_HOSTS:
     raise ImproperlyConfigured("Wildcard ALLOWED_HOSTS is forbidden in production.")
 

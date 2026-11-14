@@ -17,7 +17,6 @@
 cp .env.production.example .env.production
 chmod 600 .env.production
 openssl rand -base64 48  # یک بار برای SECRET_KEY
-openssl rand -base64 48  # مقدار جداگانه برای PAYMENT_SECRET
 openssl rand -base64 32  # برای DATABASE_PASSWORD
 openssl rand -base64 32  # مقدار جداگانه برای MARIADB_ROOT_PASSWORD
 nano .env.production
@@ -25,7 +24,7 @@ nano .env.production
 
 مقادیر `REPLACE_...` را حتماً جایگزین کنید. `.env.production` را commit یا در image کپی نکنید. subnetهای Docker در فایل نمونه باید با شبکه‌های VPN/شبکه داخلی VPS تداخل نداشته باشند؛ در صورت تغییر `PROXY_SUBNET`، `NGINX_PROXY_IP` نیز باید داخل همان subnet باشد. Compose production اختصاصی دو شبکه‌ی non-overlapping می‌سازد و شبکه‌ی اپ داخلی است.
 
-برای سرویس‌های واقعی `SMS_PROVIDER` و `PAYMENT_GATEWAY` باید adapter سازگار همین پروژه و کلیدهای واقعی پیکربندی شوند. در کد کنونی `console` پیامک واقعی ارسال نمی‌کند و `mock` تراکنش واقعی انجام نمی‌دهد؛ راه‌اندازی وب با این مقادیر به معنی آماده بودن فروش برای مشتری نیست.
+درگاه پرداخت زیبال پیاده‌سازی شده است. `PAYMENT_GATEWAY=zibal` و `ZIBAL_MERCHANT` واقعی پنل زیبال را تنظیم کنید؛ `SITE_URL=https://minikandoo.ir` باید با دامنه ثبت‌شده درگاه مرتبط باشد و IP خروجی VPS، در صورت فعال بودن محدودیت IP، در پنل مجاز باشد. حساب تست `zibal` در Production رد می‌شود. اتصال HTTPS خروجی به `gateway.zibal.ir` لازم است. [جزئیات چرخه پرداخت و بازیابی](zibal-payment.md) را ببینید. برای `SMS_PROVIDER` همچنان adapter و کلید واقعی لازم است؛ `console` پیامک واقعی ارسال نمی‌کند.
 
 ## 3. صدور اولیه TLS
 

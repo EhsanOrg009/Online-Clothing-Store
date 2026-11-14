@@ -1,14 +1,10 @@
-"""View های پرداخت: انتقال به درگاه، Callback، صفحه Mock و نتایج."""
+"""View های پرداخت: انتقال به زیبال، Callback و نتایج."""
 
 from __future__ import annotations
 
-import hmac
-
-from django.conf import settings
 from django.contrib import messages
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
-from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from django.views.decorators.http import require_GET
 
@@ -17,7 +13,7 @@ from orders.choices import PaymentStatus
 from orders.models import Order
 
 from .gateways import PaymentGatewayError, get_gateway
-from .gateways.mock import MockGateway
+from .gateways.zibal import parse_callback
 from .models import Payment
 from .services import PaymentError, process_callback
 
@@ -54,11 +50,14 @@ def payment_redirect(request, pk: int):
         messages.error(request, _("آدرس درگاه پرداخت در دسترس نیست."))
         return redirect("orders:detail", order_number=payment.order.order_number)
 
-    return render(
+    response = render(
         request,
         "payments/redirect.html",
         {"payment": payment, "redirect_url": redirect_url},
     )
+    # Start زیبال Referer می‌خواهد؛ فقط origin فروشگاه ارسال می‌شود.
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
 
 # ---------------------------------------------------------------------
@@ -70,82 +69,49 @@ def payment_callback(request):
     دریافت بازگشت کاربر از درگاه.
 
     نکته امنیتی: داده‌های Query به‌تنهایی پذیرفته نمی‌شوند؛
-    نتیجه با Verify (بررسی امضا/وضعیت نزد درگاه) تعیین می‌شود.
+    نتیجه با Verify و تطبیق اطلاعات نزد زیبال تعیین می‌شود.
     """
-    authority = (request.GET.get("authority") or "").strip()
-    if not authority:
+    try:
+        callback_data = parse_callback(request.GET)
+    except PaymentGatewayError:
         messages.error(request, _("درخواست پرداخت نامعتبر است."))
         return redirect("store:home")
 
     payment = (
-        Payment.objects.select_related("order").filter(authority=authority).first()
+        Payment.objects.select_related("order").filter(
+            gateway="zibal", authority=callback_data["trackId"]
+        ).first()
     )
     if payment is None:
         messages.error(request, _("تراکنش موردنظر یافت نشد."))
+        return redirect("store:home")
+    if callback_data["orderId"] != payment.order.order_number:
+        messages.error(request, _("اطلاعات بازگشت با سفارش مطابقت ندارد."))
         return redirect("store:home")
 
     try:
         payment = process_callback(
             payment,
-            callback_data={
-                "status": request.GET.get("status", ""),
-                "sig": request.GET.get("sig", ""),
-                "ref_id": request.GET.get("ref_id", ""),
-            },
+            callback_data=callback_data,
         )
     except PaymentError as exc:
         messages.error(request, exc.message)
         return redirect("orders:detail", order_number=payment.order.order_number)
 
+    if payment.needs_refund:
+        messages.warning(request, payment.error_message)
     return _result_redirect(payment)
 
 
 def _result_redirect(payment: Payment):
     order_number = payment.order.order_number
+    if payment.needs_refund or payment.is_pending:
+        return redirect("orders:detail", order_number=order_number)
     if payment.status == PaymentStatus.SUCCESSFUL:
         return redirect("payments:result_success", order_number=order_number)
     if payment.status == PaymentStatus.CANCELLED:
         return redirect("payments:result_cancelled", order_number=order_number)
     return redirect("payments:result_failed", order_number=order_number)
-
-
-# ---------------------------------------------------------------------
-# صفحه Mock درگاه (فقط Development)
-# ---------------------------------------------------------------------
-@require_GET
-def mock_gateway(request, authority: str):
-    """صفحه جعلی «درگاه بانکی» برای توسعه؛ در Production غیرفعال است."""
-    if not settings.DEBUG:
-        raise Http404
-
-    payment = get_object_or_404(
-        Payment.objects.select_related("order"), authority=authority
-    )
-    if not payment.is_pending:
-        return _result_redirect(payment)
-
-    try:
-        gateway = get_gateway()
-    except PaymentGatewayError:
-        raise Http404
-
-    if not isinstance(gateway, MockGateway):  # pragma: no cover - ایمنی
-        raise Http404
-
-    start_payload = f"start|{payment.authority}|{request.GET.get('amount', '')}"
-    if not hmac.compare_digest(gateway.sign(start_payload), request.GET.get("sig", "")):
-        messages.error(request, _("لینک پرداخت نامعتبر است."))
-        return redirect("orders:detail", order_number=payment.order.order_number)
-
-    callback_urls = {
-        status: reverse("payments:callback") + "?" + gateway.build_callback_query(payment, status)
-        for status in ("successful", "failed", "cancelled")
-    }
-    return render(
-        request,
-        "payments/mock_gateway.html",
-        {"payment": payment, "callback_urls": callback_urls},
-    )
 
 
 # ---------------------------------------------------------------------

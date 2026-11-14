@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
+const { mockZibalPage } = require('./qa/zibal-browser.cjs');
 const base = process.env.SHOP_QA_URL || 'http://127.0.0.1:8765';
 const auth = JSON.parse(fs.readFileSync(process.env.SHOP_QA_AUTH_FILE || '/tmp/shop-qa-auth.json', 'utf8'));
 const out = process.env.SHOP_QA_OUTPUT || '/tmp/shop-browser-results';
@@ -20,6 +21,7 @@ let browser;
     admin:auth.admin_routes
   })) {
     const context = await browser.newContext();
+    await mockZibalPage(context, base);
     if (auth[role]) await context.addCookies([{name:'sessionid',value:auth[role],url:base}]);
     const page = await context.newPage();
     let expectedNetworkFailure = false;
@@ -90,7 +92,7 @@ let browser;
       const addressCard=page.locator('article').filter({has:page.getByRole('heading',{name:'گیرنده آزمایش مرورگر',exact:true})});
       assert(await addressCard.isVisible());page.once('dialog',dialog=>dialog.accept());await addressCard.getByRole('button',{name:'حذف آدرس',exact:true}).click();await page.waitForLoadState('networkidle');assert.equal(await page.getByRole('heading',{name:'گیرنده آزمایش مرورگر',exact:true}).count(),0);
       await page.goto(base+'/checkout/');await page.getByRole('button',{name:'ادامه با آدرس انتخاب‌شده'}).click();await page.waitForLoadState('networkidle');assert(page.url().endsWith('/checkout/review/'));
-      await page.getByRole('button',{name:/ثبت سفارش و پرداخت/}).click();await page.waitForURL(/\/payments\/mock\//);await page.getByRole('link',{name:'آزمایش نتیجه موفق'}).click();await page.waitForURL(/\/success\//);assert(await page.getByRole('heading',{name:'پرداخت با موفقیت انجام شد'}).isVisible());
+      await page.getByRole('button',{name:/ثبت سفارش و پرداخت/}).click();await page.waitForURL('https://gateway.zibal.ir/start/*');await page.getByRole('link',{name:'آزمایش نتیجه موفق'}).click();await page.waitForURL(/\/success\//);assert(await page.getByRole('heading',{name:'پرداخت با موفقیت انجام شد'}).isVisible());
     }
     if (role==='admin') {
       await page.goto(base+'/admin/products/product/');

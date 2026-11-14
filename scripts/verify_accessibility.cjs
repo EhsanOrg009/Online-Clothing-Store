@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const {chromium} = require('playwright');
+const { mockZibalPage } = require('./qa/zibal-browser.cjs');
 const base = process.env.SHOP_QA_URL || 'http://127.0.0.1:8765';
 const auth = JSON.parse(fs.readFileSync(process.env.SHOP_QA_AUTH_FILE || '/tmp/shop-qa-auth.json', 'utf8'));
 const output = process.env.SHOP_QA_A11Y_OUTPUT || '/tmp/shop-plum-accessibility.json';
@@ -19,13 +20,18 @@ let browser;
   };
   for (const [role, paths] of Object.entries(routes)) {
     const context = await browser.newContext();
+    await mockZibalPage(context, base);
     if (auth[role]) await context.addCookies([{name:'sessionid',value:auth[role],url:base}]);
     const page = await context.newPage();
     for (const width of [360,1280]) {
       await page.setViewportSize({width,height:900});
       for (const route of paths) {
         const response = await page.goto(base+route,{waitUntil:'networkidle'});
-        assert.equal(page.url(),new URL(base+route).href,`Unexpected redirect for ${role} ${route}`);
+        if (route.startsWith('/payments/redirect/')) {
+          assert(page.url() === new URL(base+route).href || page.url().startsWith('https://gateway.zibal.ir/start/'), `Unexpected payment redirect for ${role}`);
+        } else {
+          assert.equal(page.url(),new URL(base+route).href,`Unexpected redirect for ${role} ${route}`);
+        }
         const expectedStatus = route.startsWith('/__qa__/') ? Number(route.split('/')[2]) : 200;
         assert.equal(response.status(),expectedStatus,`Unexpected response for ${role} ${route}`);
         const csp = response.headers()['content-security-policy'] || '';

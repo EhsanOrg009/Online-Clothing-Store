@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -56,14 +56,18 @@ def create_payment_for_order(order: Order, request=None) -> Payment:
         logger.error("خطای درگاه پرداخت: %s", exc)
         raise PaymentError(_("اتصال به درگاه پرداخت ممکن نشد. لطفاً بعداً تلاش کنید.")) from exc
 
-    payment = Payment.objects.create(
-        order=order,
-        gateway=gateway.name,
-        amount=order.total,  # مبلغ فقط از Backend
-        status=PaymentStatus.PENDING,
-        authority=payment_request.authority,
-        metadata={"redirect_url": payment_request.redirect_url},
-    )
+    try:
+        payment = Payment.objects.create(
+            order=order,
+            gateway=gateway.name,
+            amount=order.total,  # مبلغ فقط از Backend؛ تبدیل ریال فقط در adapter
+            status=PaymentStatus.PENDING,
+            authority=payment_request.authority,
+            metadata={"redirect_url": payment_request.redirect_url},
+        )
+    except IntegrityError as exc:
+        logger.error("شناسه تکراری از درگاه برای سفارش %s", order.order_number)
+        raise PaymentError(_("شناسه پرداخت نامعتبر است. لطفاً دوباره تلاش کنید.")) from exc
 
     if order.status == OrderStatus.PAYMENT_FAILED:
         order.status = OrderStatus.PENDING_PAYMENT
@@ -81,11 +85,12 @@ def process_callback(payment: Payment, callback_data: dict | None = None) -> Pay
 
     خروجی: تراکنش با وضعیت نهایی.
     """
-    payment = (
-        Payment.objects.select_for_update()
-        .select_related("order")
-        .get(pk=payment.pk)
-    )
+    # ترتیب قفل با ایجاد پرداخت یکسان است. تلاش‌های مختلف پرداخت یک سفارش
+    # نیز نمی‌توانند همزمان آن سفارش را موفق پردازش کنند.
+    order_id = Payment.objects.values_list("order_id", flat=True).get(pk=payment.pk)
+    order = Order.objects.select_for_update().get(pk=order_id)
+    payment = Payment.objects.select_for_update().get(pk=payment.pk)
+    payment.order = order
     payment.callback_count += 1
     payment.save(update_fields=["callback_count"])
 
@@ -93,7 +98,6 @@ def process_callback(payment: Payment, callback_data: dict | None = None) -> Pay
     if payment.status in (
         PaymentStatus.SUCCESSFUL,
         PaymentStatus.CANCELLED,
-        PaymentStatus.EXPIRED,
     ):
         logger.info(
             "Callback تکراری برای تراکنش %s نادیده گرفته شد (وضعیت: %s)",
@@ -114,7 +118,9 @@ def process_callback(payment: Payment, callback_data: dict | None = None) -> Pay
         logger.error("خطا در Verify تراکنش %s: %s", payment.authority, exc)
         raise PaymentError(_("تأیید پرداخت ممکن نشد. لطفاً با پشتیبانی تماس بگیرید.")) from exc
 
-    payment.verified_at = timezone.now()
+    payment.metadata = {**payment.metadata, "verification": result.raw}
+    if result.status != PaymentStatus.PENDING:
+        payment.verified_at = timezone.now()
 
     if result.successful:
         payment.status = PaymentStatus.SUCCESSFUL
@@ -123,6 +129,13 @@ def process_callback(payment: Payment, callback_data: dict | None = None) -> Pay
         payment.paid_at = timezone.now()
         payment.error_message = ""
         payment.save()
+        if order.is_paid:
+            # دریافت واقعی وجه برای تلاش دوم ثبت می‌شود، ولی سفارش دوباره پرداخت نمی‌شود.
+            payment.needs_refund = True
+            payment.error_message = _("سفارش قبلاً با تراکنش دیگری پرداخت شده؛ نیازمند بازگشت وجه.")
+            payment.save(update_fields=["needs_refund", "error_message"])
+            logger.critical("پرداخت اضافه برای سفارش %s؛ نیازمند بازگشت وجه", order.order_number)
+            return payment
         try:
             mark_order_paid(payment.order, paid_at=payment.paid_at)
         except OrderNotPayable:
@@ -135,7 +148,7 @@ def process_callback(payment: Payment, callback_data: dict | None = None) -> Pay
             )[:255]
             payment.save(update_fields=["needs_refund", "error_message"])
             logger.critical(
-                "پرداخت موفق برای سفارش لغو/منقضی‌شدهٔ %s؛ نیازمند بازگشت وجه (Authority=%s)",
+                "پرداخت موفق برای سفارش لغو/منقضی‌شدهٔ %s؛ نیازمند بازگشت وجه (trackId=%s)",
                 payment.order.order_number,
                 payment.authority,
             )
@@ -153,6 +166,10 @@ def process_callback(payment: Payment, callback_data: dict | None = None) -> Pay
     payment.status = result.status or PaymentStatus.FAILED
     payment.error_message = (result.message or _("پرداخت ناموفق بود."))[:255]
     payment.save()
+
+    if payment.status == PaymentStatus.PENDING:
+        logger.info("تراکنش %s همچنان در انتظار پرداخت است", payment.authority)
+        return payment
 
     order = payment.order
     if order.status == OrderStatus.PENDING_PAYMENT:

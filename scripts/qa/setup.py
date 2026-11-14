@@ -21,12 +21,14 @@ from cart.models import Cart, CartItem
 from orders.services import create_order
 from orders.choices import OrderStatus, PaymentStatus
 from payments.services import create_payment_for_order, process_callback
-from payments.gateways.mock import MockGateway
+from zibal_fixtures import mocked_api, record_result, callback_data
 from accounts.otp import request_otp
 from io import BytesIO
 from PIL import Image, ImageDraw
 if str(settings.DATABASES['default']['NAME']) != '/tmp/shop-browser.sqlite3':
  raise RuntimeError('Browser fixtures may only write to the isolated /tmp database.')
+payment_api = mocked_api()
+payment_api.start()
 call_command('migrate', verbosity=0)
 User=get_user_model()
 password=secrets.token_urlsafe(24)
@@ -53,8 +55,8 @@ from orders.models import Order
 if not Order.objects.filter(customer=customer).exists():
  order=create_order(customer=customer,cart=cart,address=address)
  payment=create_payment_for_order(order)
- from payments.gateways.mock import MockGateway
- gateway=MockGateway();process_callback(payment,{'status':'successful','sig':gateway.sign(f'result|{payment.authority}|successful')})
+ record_result(payment, 'successful')
+ process_callback(payment, callback_data(payment))
  CartItem.objects.create(cart=cart,variant=ProductVariant.objects.filter(product__slug='qa-product-0',color=color).first(),quantity=2)
 incomplete, _=User.objects.get_or_create(phone_number='09120000003', defaults={'is_phone_verified':True})
 Group.objects.get_or_create(name='گروه آزمایش رابط مدیریت')
@@ -67,17 +69,17 @@ sessions['admin_password']=password
 sessions['order_number']=Order.objects.filter(customer=customer, payment_status=PaymentStatus.SUCCESSFUL).first().order_number
 sessions['customer_routes']=[f'/accounts/addresses/{address.pk}/edit/']
 sessions['payment_routes']=[]
-gateway=MockGateway()
 for outcome in ['failed', 'cancelled', 'pending']:
  qa_cart=Cart.objects.create(user=customer)
  CartItem.objects.create(cart=qa_cart,variant=ProductVariant.objects.filter(product__slug='qa-product-1',color=color).first(),quantity=1)
  qa_order=create_order(customer=customer,cart=qa_cart,address=address)
  payment=create_payment_for_order(qa_order)
  if outcome!='pending':
-  process_callback(payment,{'status':outcome,'sig':gateway.sign(f'result|{payment.authority}|{outcome}')})
+  record_result(payment, outcome)
+  process_callback(payment, callback_data(payment, outcome))
   sessions['payment_routes'].append(reverse(f'payments:result_{outcome}',args=[qa_order.order_number]))
  else:
-  sessions['payment_routes'].append(gateway.get_payment_url(payment))
+  sessions['payment_routes'].append(reverse('payments:redirect', args=[payment.pk]))
  qa_cart.delete()
 sessions['payment_routes'].append(reverse('payments:result_success',args=[sessions['order_number']]))
 request=RequestFactory().get('/');request.user=admin
@@ -100,4 +102,5 @@ Cart.objects.filter(pk=cart.pk).update(updated_at=timezone.now())
 auth_file = Path('/tmp/shop-qa-auth.json')
 auth_file.write_text(json.dumps(sessions))
 auth_file.chmod(0o600)
+payment_api.stop()
 print('Isolated browser fixtures ready; no project/customer database touched.')

@@ -1,11 +1,4 @@
-"""
-لایه انتزاعی درگاه‌های پرداخت.
-
-نحوه افزودن درگاه واقعی در آینده:
-    ۱) کلاسی مانند `payments/gateways/zarinpal.py` با Interface پایه بسازید.
-    ۲) در فایل `.env` مقدار `PAYMENT_GATEWAY` را به مسیر کلاس تنظیم کنید:
-           PAYMENT_GATEWAY=payments.gateways.zarinpal.ZarinpalGateway
-"""
+"""رابط موجود پرداخت و درگاه زیبال."""
 
 from .base import (
     PaymentGateway,
@@ -13,7 +6,7 @@ from .base import (
     PaymentRequest,
     VerificationResult,
 )
-from .mock import MockGateway
+from .zibal import ZibalGateway
 from .registry import get_gateway
 
 __all__ = [
@@ -21,6 +14,6 @@ __all__ = [
     "PaymentGatewayError",
     "PaymentRequest",
     "VerificationResult",
-    "MockGateway",
+    "ZibalGateway",
     "get_gateway",
 ]

@@ -141,8 +141,9 @@ class RedesignTests(TestCase):
         self.assertContains(response, 'aria-invalid="true"')
         self.assertRegex(response.content.decode(), r'<details[^>]+open')
 
-    @override_settings(DEBUG=True, PAYMENT_GATEWAY="mock")
-    def test_empty_optional_note_can_submit_checkout(self):
+    @override_settings(DEBUG=True, PAYMENT_GATEWAY="zibal", ZIBAL_MERCHANT="zibal")
+    @patch("payments.gateways.zibal.ZibalGateway._post", return_value={"result": 100, "trackId": 15966442233311})
+    def test_empty_optional_note_can_submit_checkout(self, zibal_api):
         self.login(); self.cart()
         response = self.client.post("/checkout/review/", {})
         self.assertEqual(response.status_code, 302)
@@ -183,21 +184,30 @@ class RedesignTests(TestCase):
         for name in ["result_failed", "result_cancelled", "result_success"]:
             self.assertRedirects(self.client.get(reverse(f"payments:{name}", args=[order.order_number])), reverse("orders:detail", args=[order.order_number]))
 
-    @override_settings(DEBUG=True, PAYMENT_GATEWAY="mock")
-    def test_mock_result_replay_and_result_templates(self):
+    @override_settings(DEBUG=True, PAYMENT_GATEWAY="zibal", ZIBAL_MERCHANT="zibal")
+    @patch("payments.gateways.zibal.ZibalGateway._post")
+    def test_zibal_result_replay_and_result_templates(self, zibal_api):
         from payments.services import create_payment_for_order, process_callback
-        from payments.gateways.mock import MockGateway
         order = self.order(); self.login()
+        details = {"result": 100, "amount": int(order.total) * 10, "orderId": order.order_number}
+        zibal_api.side_effect = [
+            {"result": 100, "trackId": 15966442233311},
+            {"result": 202},
+            {**details, "status": 5},
+            {"result": 100, "trackId": 15966442233312},
+            {**details, "status": 1, "refNumber": 12312, "paidAt": "2026-11-14T10:30:00"},
+        ]
         payment = create_payment_for_order(order)
-        gateway = MockGateway()
-        result = process_callback(payment, {"status": "failed", "sig": gateway.sign(f"result|{payment.authority}|failed")})
+        result = process_callback(payment, {"trackId": payment.authority, "orderId": order.order_number, "success": "0", "status": "5"})
         self.assertEqual(result.status, PaymentStatus.FAILED)
         response = self.client.get(reverse("payments:result_failed", args=[order.order_number]))
         self.assertContains(response, "پرداخت ناموفق بود")
         self.assertNotContains(response, "مبلغی از حساب شما کسر نشده")
         second = create_payment_for_order(order)
-        process_callback(second, {"status": "successful", "sig": gateway.sign(f"result|{second.authority}|successful")})
-        process_callback(second, {"status": "successful", "sig": gateway.sign(f"result|{second.authority}|successful")})
+        callback = {"trackId": second.authority, "orderId": order.order_number, "success": "1", "status": "2"}
+        process_callback(second, callback)
+        process_callback(second, callback)
+        self.assertEqual(zibal_api.call_count, 5)
         self.variant.refresh_from_db(); self.assertEqual(self.variant.stock, 8)
         self.assertContains(self.client.get(reverse("payments:result_success", args=[order.order_number])), "پرداخت با موفقیت انجام شد")
 

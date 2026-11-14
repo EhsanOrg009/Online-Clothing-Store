@@ -4,10 +4,8 @@ Interface مشترک درگاه‌های پرداخت (Hosted / Redirect-based).
 نکته مهم: سایت ما هرگز فرم ورود اطلاعات کارت (شماره کارت، CVV2، رمز پویا و ...)
 را پیاده‌سازی نمی‌کند؛ پرداخت فقط روی صفحه رسمی درگاه انجام می‌شود.
 
-برای اتصال درگاه واقعی در آینده:
-    ۱) کلاسی با همین Interface بسازید (مثلاً `ZarinpalGateway`)
-    ۲) مسیر کلاس را در `PAYMENT_GATEWAY` تنظیم کنید.
-هسته سفارش و پرداخت تغییری نمی‌کند.
+زیبال این Interface را پیاده‌سازی می‌کند؛ هسته سفارش به جزئیات API وابسته نیست.
+فیلد authority برای سازگاری با سوابق موجود حفظ شده و trackId زیبال را نگه می‌دارد.
 """
 
 from __future__ import annotations
@@ -50,7 +48,7 @@ class PaymentGateway(ABC):
 
     @abstractmethod
     def create_payment(self, order, request=None) -> PaymentRequest:
-        """ایجاد تراکنش نزد درگاه و دریافت Authority + آدرس پرداخت."""
+        """ایجاد تراکنش نزد درگاه و دریافت شناسه + آدرس پرداخت."""
 
     @abstractmethod
     def verify_payment(self, payment, callback_data: dict | None = None) -> VerificationResult:

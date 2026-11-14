@@ -9,7 +9,6 @@ app_name = "payments"
 urlpatterns = [
     path("redirect/<int:pk>/", views.payment_redirect, name="redirect"),
     path("callback/", views.payment_callback, name="callback"),
-    path("mock/gateway/<str:authority>/", views.mock_gateway, name="mock_gateway"),
     path(
         "result/<str:order_number>/success/",
         views.result_success,

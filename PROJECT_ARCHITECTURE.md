@@ -220,10 +220,10 @@ OrderItem                 ★ Snapshot قیمت و نام
 ```
 Payment
 ├── order → Order
-├── gateway              نام درگاه (mock / zarinpal / ...)
+├── gateway              نام درگاه (zibal؛ مقادیر تاریخی بدون تغییر حفظ می‌شوند)
 ├── amount  Decimal      ★ از order.total؛ هرگز از Client
 ├── status               PENDING | SUCCESSFUL | FAILED | CANCELLED | EXPIRED
-├── authority            شناسه‌ی تراکنش نزد درگاه
+├── authority            trackId زیبال؛ نام فیلد برای سازگاری سوابق حفظ شده است
 ├── transaction_id / reference_id
 ├── metadata (JSON)      شامل redirect_url
 ├── verified_at / paid_at
@@ -391,7 +391,7 @@ payments/gateways/
 │                 ├── create_payment(order, request) -> PaymentRequest
 │                 ├── verify_payment(payment, callback_data) -> VerificationResult
 │                 └── get_payment_url(payment) -> str
-├── mock.py       درگاه Mock برای توسعه
+├── zibal.py      درخواست، تایید و استعلام JSON از API رسمی زیبال
 └── registry.py   انتخاب بر اساس PAYMENT_GATEWAY
 ```
 
@@ -401,37 +401,37 @@ payments/gateways/
   create_payment_for_order(order)
    ├─ قفل سفارش
    ├─ رد اگر: پرداخت‌شده / منقضی / قابل‌پرداخت‌نیست / بدون آیتم
-   ├─ gateway.create_payment() → authority + redirect_url
+   ├─ gateway.create_payment() → trackId در authority + redirect_url
    └─ ساخت Payment با amount = order.total  ★ از Backend
 
   صفحه‌ی Redirect
-   └─ <meta http-equiv="refresh" content="0; url=...">   ★ بدون JavaScript
+   └─ انتقال به https://gateway.zibal.ir/start/{trackId} با Referer دامنه فروشگاه
 
   payment_callback(request)
-   ├─ خواندن authority از Query
-   ├─ یافتن Payment (بدون اعتماد به status/sig)
+   ├─ اعتبارسنجی Query: trackId / success / status / orderId
+   ├─ یافتن Payment زیبال با trackId و تطبیق orderId
    └─ process_callback(payment, callback_data)
-        ├─ افزایش callback_count
-        ├─ ⛔ Idempotency: اگر قبلاً SUCCESSFUL/CANCELLED/EXPIRED → بازگشت
+        ├─ قفل سفارش و سپس Payment؛ افزایش callback_count
+        ├─ ⛔ Idempotency: اگر قبلاً SUCCESSFUL/CANCELLED → بازگشت
         ├─ gateway.verify_payment()      ★ تأیید سمت سرور
-        │    ├─ مقایسه‌ی HMAC امضا با hmac.compare_digest
-        │    └─ مقایسه‌ی payment.amount با order.total
-        └─ در صورت موفقیت: mark_order_paid (Idempotent)
+        │    ├─ POST /v1/verify؛ برای 201/202 استعلام /v1/inquiry
+        │    └─ تطبیق status=1، مبلغ ریالی، orderId و شماره مرجع
+        └─ mark_order_paid؛ وجه اضافه/سفارش لغوشده → needs_refund
 ```
 
 ### سه لایه‌ی دفاعی
 
-**۱) امضای HMAC.** درگاه Mock امضای `result|authority|status` را با `PAYMENT_SECRET` می‌سازد. بدون امضای معتبر، `verify_payment` نتیجه را `FAILED` برمی‌گرداند.
+**۱) اتصال تراکنش به سفارش.** Callback باید شناسه عددی معتبر و پارامترهای بدون تکرار داشته باشد. `trackId` و `orderId` باید به همان تراکنش ثبت‌شده تعلق داشته باشند.
 
-**۲) تأیید سمت سرور.** پارامترهای Query به‌تنهایی هیچ معنایی ندارند. حتی اگر مهاجم `status=successful` بفرستد، بدون امضای درست نادیده گرفته می‌شود. این با تست `test_tampered_status_is_rejected` پوشش داده شده.
+**۲) تأیید سمت سرور.** `success` و `status` دریافتی دلیل پرداخت نیستند؛ فقط پاسخ HTTPS زیبال با مبلغ ریالی و سفارش منطبق می‌تواند پرداخت را تایید کند. کد `201` به‌تنهایی کافی نیست و استعلام تاییدشده لازم دارد. خطای شبکه یا پاسخ نامعتبر سفارش را تغییر نمی‌دهد.
 
 **۳) Idempotency.** ارسال دوباره‌ی Callback (کلیک مجدد، Refresh، بازگشت مرورگر) باعث پردازش مجدد نمی‌شود: وضعیت تغییر نمی‌کند، `mark_order_paid` دوباره اجرا نمی‌شود و **موجودی دوبار کم نمی‌شود**.
 
 > توجه: افزایش `callback_count` عمداً **قبل** از بررسی Idempotency انجام می‌شود تا تعداد واقعی فراخوانی‌ها برای حسابرسی ثبت شود، در حالی که اثر عملیاتی ندارد.
 
-### گسترش به درگاه واقعی
+### پیکربندی زیبال
 
-کافی است کلاسی از `PaymentGateway` بسازید و در `.env` مسیرش را بگذارید. هسته‌ی سفارش و پرداخت تغییری نمی‌کند. جزئیات در README.
+`PAYMENT_GATEWAY=zibal` و `ZIBAL_MERCHANT` از محیط خوانده می‌شوند؛ `SITE_URL` برای ساخت Callback استفاده می‌شود. تومان در دیتابیس باقی می‌ماند و تبدیل ریال فقط در adapter انجام می‌شود. جزئیات در [راهنمای پرداخت زیبال](docs/zibal-payment.md).
 
 ---
 
@@ -656,7 +656,7 @@ uv run python manage.py test
 | `products` | ۲۴ | قیمت‌گذاری، Manager ها، محدودیت واریانت، مدل‌ها |
 | `cart` | ۲۷ | سرویس‌ها، سقف تعداد، HTMX، ایزوله‌سازی مهمان، ادغام |
 | `orders` | ۳۰ | Snapshot، Overselling، لغو، انقضا، گذار وضعیت، ارسال |
-| `payments` | ۳۸ | درگاه، امضا، Verify، Idempotency، صفحات نتیجه، جریان کامل |
+| `payments` | ۸۲ | درخواست/تایید/استعلام زیبال، خطاهای API، Callback، Idempotency، صفحات نتیجه، خرید کامل و همزمانی |
 | `store` | ۳۷ | همه‌ی صفحات، فیلترها، جستجو، جزئیات محصول، هدرهای امنیتی |
 
 ### تست‌های کلیدی
@@ -667,8 +667,8 @@ OversellingProtectionTests
 
 CallbackTests
   ├─ test_callback_is_idempotent              ارسال دوباره بدون اثر
-  ├─ test_tampered_status_is_rejected         دستکاری status
-  └─ test_tampered_authority_is_rejected      دستکاری authority
+  ├─ test_forged_success_does_not_override_failed_server_transaction
+  └─ test_invalid_callback_fields_do_not_mutate_order_or_payment
 
 VerifyOtpTests
   ├─ test_challenge_is_locked_after_max_attempts
@@ -680,7 +680,7 @@ FullPurchaseFlowTests
 
 ### نکته‌ی اجرایی
 
-تست‌های پرداخت به `DEBUG=True` نیاز دارند چون درگاه Mock عمداً با `DEBUG=False` غیرفعال است. `PaymentTestCase` این را با `@override_settings(DEBUG=True)` مدیریت می‌کند.
+تست‌های پرداخت پاسخ HTTP زیبال را Mock می‌کنند و هیچ درخواست مالی واقعی نمی‌فرستند. حساب تست رسمی فقط با `DEBUG=True` مجاز است. سه تست همزمانی برای دیتابیس دارای `select_for_update` هستند و روی SQLite اجرا نمی‌شوند.
 
 ---
 
@@ -740,9 +740,9 @@ queryset = queryset.filter(category_id__in=[category_obj.id, *descendant_ids])
 
 مدل فعلی `Discount` به صورت OneToOne با Product است. برای کد تخفیف عمومی، یک مدل جدید بسازید و در `orders/services.create_order` بعد از محاسبه‌ی `subtotal` اعمال کنید. فیلدهای `discount_total` و `total` از قبل آماده‌اند.
 
-### افزودن درگاه پرداخت واقعی
+### تنظیم درگاه پرداخت
 
-به بخش [پرداخت](#پرداخت) مراجعه کنید. فقط کافی است `PaymentGateway` را پیاده‌سازی کنید و مسیرش را در `PAYMENT_GATEWAY` بگذارید.
+به بخش [پرداخت](#پرداخت) مراجعه کنید. زیبال تنها درگاه فعال است و با `ZIBAL_MERCHANT` و دامنه بازگشت ثبت‌شده پیکربندی می‌شود.
 
 ### افزودن سرویس پیامک واقعی
 

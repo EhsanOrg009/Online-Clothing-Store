@@ -254,10 +254,9 @@ OTP_RESEND_SECONDS = env.int("OTP_RESEND_SECONDS", default=90)
 OTP_RESEND_LIMIT_PER_HOUR = env.int("OTP_RESEND_LIMIT_PER_HOUR", default=5)
 
 # درگاه پرداخت
-PAYMENT_GATEWAY = env("PAYMENT_GATEWAY", default="mock")
-PAYMENT_MERCHANT_ID = env("PAYMENT_MERCHANT_ID", default="")
-PAYMENT_API_KEY = env("PAYMENT_API_KEY", default="")
-PAYMENT_SECRET = env("PAYMENT_SECRET", default="insecure-dev-payment-secret")
+PAYMENT_GATEWAY = env("PAYMENT_GATEWAY", default="zibal")
+ZIBAL_MERCHANT = env("ZIBAL_MERCHANT", default="")
+ZIBAL_TIMEOUT_SECONDS = env.float("ZIBAL_TIMEOUT_SECONDS", default=10)
 
 # ---------------------------------------------------------------------
 # Logging

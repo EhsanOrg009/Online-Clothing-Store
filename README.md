@@ -26,8 +26,8 @@ It includes phone-number authentication with one-time passwords (OTP), product v
 - Shipping options, free shipping above a configured threshold, and customer order notes
 - Expiration of unpaid orders and release of reserved inventory
 - Hosted/redirect-based payment flow; card details are not stored or processed by this application
-- HMAC-signed payment parameters, mandatory server-side verification, and idempotent callbacks
-- A mock payment gateway for development only
+- Zibal payments with server-side verification, amount/order validation, and idempotent callbacks
+- The official Zibal test merchant for development; real merchant credentials for production
 - Admin dashboard for sales, orders, and low-stock products
 - Controlled order-status transitions and management of products, categories, variants, discounts, customers, addresses, and transactions
 - Security headers, Content Security Policy (CSP) with nonces, input validation, and brute-force protection
@@ -92,7 +92,7 @@ uv sync
 cp .env.example .env
 ```
 
-Open `.env` and set the values required by your local environment. In particular, do not leave required secrets such as `SECRET_KEY`, `PAYMENT_SECRET`, or `DATABASE_PASSWORD` empty or set to example values.
+Open `.env` and set the values required by your local environment. In particular, do not leave required secrets such as `SECRET_KEY` or `DATABASE_PASSWORD` empty or set to example values. Configure `ZIBAL_MERCHANT` from the Zibal panel for production.
 
 ---
 
@@ -159,11 +159,11 @@ With `SMS_PROVIDER=console`, development OTP messages are printed to the server 
 ## ❗ Notes
 
 - The interface is Persian and RTL by design.
-- The mock payment gateway is for development only. It works with `DEBUG=True` and is disabled when `DEBUG=False`.
+- The official test merchant `ZIBAL_MERCHANT=zibal` is accepted only with `DEBUG=True`.
 - With the default `SMS_PROVIDER=console`, OTP codes are printed to the server terminal rather than sent as real SMS messages.
 - Demo account credentials and demo database passwords are for local development only. Change or remove them before exposing any deployment to a network.
 - Keep real secrets in environment variables. Never commit your real `.env` file, payment credentials, or production database password.
-- A real payment gateway requires a provider implementation and valid merchant credentials. Do not treat a successful browser redirect as proof of payment; always verify the transaction on the server.
+- Zibal requires valid merchant credentials and a registered callback domain. A browser redirect is followed by server-side verification before an order is marked paid.
 - Tailwind CSS v4 custom utilities should be declared with `@utility`; the source stylesheet is `assets/css/app.css`.
 - The project uses Python `Decimal` for monetary calculations to avoid floating-point rounding issues.
 
@@ -195,7 +195,7 @@ cp .env.example .env
 Check the required settings:
 
 ```bash
-grep -E "^(SECRET_KEY|PAYMENT_SECRET|DATABASE_PASSWORD)=" .env
+uv run python manage.py check
 ```
 
 Start the development services:
@@ -260,7 +260,9 @@ Important production settings include:
 | --- | --- | --- |
 | `DJANGO_SETTINGS_MODULE` | `config.settings.production` | Loads production settings |
 | `SECRET_KEY` | Required, strong random value | Django signing and security |
-| `PAYMENT_SECRET` | Required, strong random value | Payment request/callback signing |
+| `ZIBAL_MERCHANT` | Required, real Zibal merchant in production | Zibal API authentication |
+| `ZIBAL_TIMEOUT_SECONDS` | `10` by default | HTTP timeout in seconds |
+| `SITE_URL` | Storefront origin; HTTPS in production | Builds the payment callback URL |
 | `DATABASE_PASSWORD` | Required, strong password | Database authentication |
 | `ALLOWED_HOSTS` | Your real domain | Allowed host names |
 | `CSRF_TRUSTED_ORIGINS` | Full origins, including `https://` | CSRF protection behind the domain |
@@ -510,50 +512,37 @@ The example above is a template, not a complete provider integration. Add real A
 ---
 ## 💳 Payment Gateway Configuration
 
-The default development configuration uses the mock gateway:
+Zibal is the only active payment gateway. Its integration follows the [official IPG documentation](https://help.zibal.ir/ipg/) and uses the existing `PaymentGateway` interface.
 
 ```env
-PAYMENT_GATEWAY=mock
-PAYMENT_SECRET=change-me-to-a-long-random-string
+PAYMENT_GATEWAY=zibal
+ZIBAL_MERCHANT=zibal
+ZIBAL_TIMEOUT_SECONDS=10
+SITE_URL=http://localhost:8000
 ORDER_RESERVATION_MINUTES=30
 ```
 
-Replace the example `PAYMENT_SECRET` with a strong random value in your local environment. The mock gateway is available only when `DEBUG=True` and is automatically disabled with `DEBUG=False`.
+The literal `zibal` merchant is Zibal's public test account and is allowed only in development. For production, set `ZIBAL_MERCHANT` to the merchant identifier shown in the Zibal panel and `SITE_URL` to the registered HTTPS storefront origin. Production settings reject a missing merchant or the test account.
 
-### Add a real payment gateway
+### Payment lifecycle
 
-Implement the `PaymentGateway` interface and configure `PAYMENT_GATEWAY` to point to your provider class. The following is a structural example, not a complete integration with a payment provider:
+| Operation | Endpoint |
+| --- | --- |
+| Request payment | `POST https://gateway.zibal.ir/v1/request` |
+| Open hosted payment page | `GET https://gateway.zibal.ir/start/{trackId}` |
+| Verify payment | `POST https://gateway.zibal.ir/v1/verify` |
+| Recover an already verified payment / inspect an unpaid transaction | `POST https://gateway.zibal.ir/v1/inquiry` |
 
-```python
-# payments/gateways/zarinpal.py
-from .base import PaymentGateway, PaymentRequest, VerificationResult
+- The database keeps amounts in Toman. Only the adapter converts `order.total` to integer Rial (`×10`).
+- Zibal's `trackId` is stored in the existing unique `Payment.authority` field. Verified `refNumber` is stored in `reference_id`; no schema migration or financial-history rewrite is needed.
+- The existing `/payments/callback/` URL accepts Zibal's GET parameters `trackId`, `success`, `status` and the `orderId` sent with the request. Malformed, duplicated or mismatched parameters cannot change an order.
+- A verified payment requires server result `100`, status `1`, and matching amount/order identifiers with a valid reference. Verify result `201` is followed by inquiry; that code alone never marks an order paid.
+- Callback processing locks the order and payment. Duplicate callbacks repeat no fulfillment; an additional actual payment for an already paid or cancelled order is flagged for manual refund.
+- API errors preserve retryable transactions. A server-reported cancellation or failure is handled separately from connection/response errors.
+- The redirect page sends only the storefront origin as `Referer`, as required by Zibal, including automatic navigation without JavaScript. Global referrer settings and frontend styling stay unchanged.
+- Credentials and card data are never included in the redirect URL, frontend code, stored verification data or error logs.
 
-
-class ZarinpalGateway(PaymentGateway):
-    name = "zarinpal"
-
-    def create_payment(self, order, request=None) -> PaymentRequest:
-        ...
-
-    def verify_payment(self, payment, callback_data=None) -> VerificationResult:
-        ...
-```
-
-Example environment configuration:
-
-```env
-PAYMENT_GATEWAY=payments.gateways.zarinpal.ZarinpalGateway
-PAYMENT_MERCHANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-PAYMENT_SECRET=<long-random-secret>
-```
-
-Any real gateway implementation must follow these rules:
-
-- Read the transaction amount from `order.total`; never trust an amount supplied by the client.
-- Verify payment on the server with the payment provider. Query parameters alone are not proof of payment.
-- Keep callback processing idempotent so repeated callbacks cannot cause repeated side effects.
-- Do not store or process card details in this application.
-- Store merchant credentials and signing secrets only in environment variables or a secure secrets manager.
+Automated payment tests mock HTTP responses; browser QA intercepts gateway navigation and uses only the guarded temporary database. See the [Persian integration guide](docs/zibal-payment.md) for configuration, recovery and validation details.
 
 ---
 ## 🚀 Production Deployment
@@ -577,8 +566,10 @@ CSRF_TRUSTED_ORIGINS=https://shop.example.com
 
 DATABASE_PASSWORD=<strong-database-password>
 
-PAYMENT_GATEWAY=payments.gateways.zarinpal.ZarinpalGateway
-PAYMENT_SECRET=<long-random-secret>
+PAYMENT_GATEWAY=zibal
+ZIBAL_MERCHANT=<merchant-from-zibal-panel>
+ZIBAL_TIMEOUT_SECONDS=10
+SITE_URL=https://shop.example.com
 
 SESSION_COOKIE_SECURE=True
 CSRF_COOKIE_SECURE=True
@@ -702,7 +693,7 @@ Confirm that the project's settings read `CACHE_URL` and that Redis is configure
 | Product pages load without CSS | Run `npm install && npm run build`. |
 | OTP code is not printed | Check that `SMS_PROVIDER=console` is set and run the development server in a visible terminal. |
 | `DisallowedHost: testserver` | Run tests with `uv run python manage.py test`. |
-| The mock gateway says it is only available in development | Use `DEBUG=True` in development. The mock gateway is intentionally disabled when `DEBUG=False`. |
+| Zibal refuses the test merchant in production | Set `ZIBAL_MERCHANT` to the real merchant identifier from the Zibal panel. |
 | The Add to Cart button is unavailable | Select a color and size and confirm the selected variant is in stock. |
 | `npm` dependencies appear broken | Remove `node_modules` and reinstall with `npm install`. |
 | `port is already allocated` in Docker | Change the configured `WEB_PORT` or `DB_PORT` in `.env`, if supported by your Compose configuration. |
