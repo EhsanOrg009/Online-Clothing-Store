@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from orders.choices import PaymentStatus
@@ -39,6 +40,8 @@ class VerificationResult:
     reference_id: str = ""
     message: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+    gateway_paid_at: datetime | None = None
+    timestamp_issue: str = ""
 
 
 class PaymentGateway(ABC):

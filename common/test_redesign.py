@@ -195,7 +195,7 @@ class RedesignTests(TestCase):
             {"result": 202},
             {**details, "status": 5},
             {"result": 100, "trackId": 15966442233312},
-            {**details, "status": 1, "refNumber": 12312, "paidAt": "2026-11-14T10:30:00"},
+            {**details, "status": 1, "refNumber": 12312, "paidAt": "2026-11-14T10:30:00Z"},
         ]
         payment = create_payment_for_order(order)
         result = process_callback(payment, {"trackId": payment.authority, "orderId": order.order_number, "success": "0", "status": "5"})

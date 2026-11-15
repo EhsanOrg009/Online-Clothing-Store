@@ -12,6 +12,7 @@ from accounts.forms import AddressForm
 from accounts.models import Address
 from cart.services import cart_totals, get_cart
 
+from .choices import PaymentStatus
 from .forms import CheckoutNoteForm
 from .models import Order
 from .services import OrderError, create_order
@@ -236,5 +237,9 @@ def order_detail(request, order_number: str):
     return render(
         request,
         "orders/receipt.html",
-        {"order": order, "payments": payments, "refund_pending": any(payment.needs_refund for payment in payments)},
+        {
+            "order": order, "payments": payments,
+            "refund_pending": order.payments.filter(needs_refund=True).exists(),
+            "manual_review_pending": order.payments.filter(status=PaymentStatus.MANUAL_REVIEW).exists(),
+        },
     )

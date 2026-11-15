@@ -257,6 +257,9 @@ OTP_RESEND_LIMIT_PER_HOUR = env.int("OTP_RESEND_LIMIT_PER_HOUR", default=5)
 PAYMENT_GATEWAY = env("PAYMENT_GATEWAY", default="zibal")
 ZIBAL_MERCHANT = env("ZIBAL_MERCHANT", default="")
 ZIBAL_TIMEOUT_SECONDS = env.float("ZIBAL_TIMEOUT_SECONDS", default=10)
+# Leave empty until Zibal officially confirms the IANA timezone of naive paidAt.
+# Offset-bearing timestamps always use their own offset, regardless of this value.
+ZIBAL_PAID_AT_TIMEZONE = env("ZIBAL_PAID_AT_TIMEZONE", default="")
 
 # ---------------------------------------------------------------------
 # Logging

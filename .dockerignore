@@ -27,8 +27,11 @@ node_modules
 *.key
 *.sql
 *.sql.gz
+*.sql.gz.*
 *.tar.gz
 backups
+minikandoo-backups
+zibal-recovery-*.json
 
 # ---------- لاگ و خروجی‌ها ----------
 logs

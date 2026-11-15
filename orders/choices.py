@@ -29,6 +29,7 @@ class PaymentStatus(models.TextChoices):
     FAILED = "failed", _("ناموفق")
     CANCELLED = "cancelled", _("لغو شده توسط کاربر")
     EXPIRED = "expired", _("منقضی شده")
+    MANUAL_REVIEW = "manual_review", _("نیازمند بررسی دستی")
 
     @classmethod
     def customer_label(cls, status: str) -> str:

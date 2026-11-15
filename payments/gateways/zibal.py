@@ -13,14 +13,17 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from django.conf import settings
 from django.urls import reverse
-from django.utils.dateparse import parse_datetime
 
 from orders.choices import PaymentStatus
 
 from .base import PaymentGateway, PaymentGatewayError, PaymentRequest, VerificationResult
+from .zibal_time import parse_gateway_paid_at
 
 
 _STATUSES = {-2, -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 16, 18, 21}
+# The OpenAPI specifies no reference length bound. This is the existing local
+# CharField storage limit, not a claimed Zibal integer/int64 limit.
+REFERENCE_MAX_LENGTH = 64
 _ERROR_MESSAGES = {
     102: "پذیرنده زیبال یافت نشد.",
     103: "پذیرنده زیبال غیرفعال است.",
@@ -83,6 +86,7 @@ class ZibalGateway(PaymentGateway):
         if self.merchant == "zibal" and not settings.DEBUG:
             raise PaymentGatewayError("حساب آزمایشی زیبال در Production مجاز نیست.")
         self.timeout = settings.ZIBAL_TIMEOUT_SECONDS
+        self.paid_at_timezone = getattr(settings, "ZIBAL_PAID_AT_TIMEZONE", "")
         if not math.isfinite(self.timeout) or self.timeout <= 0:
             raise PaymentGatewayError("مهلت اتصال به زیبال باید عددی مثبت باشد.")
 
@@ -179,37 +183,38 @@ class ZibalGateway(PaymentGateway):
         # اطلاعات کارت، merchant و پیام/توضیحات دلخواه در پایگاه داده ذخیره نمی‌شوند.
         return {
             "verify_result": verify_result,
-            **{key: data[key] for key in ("result", "status", "amount", "orderId", "refNumber") if key in data},
+            **{key: data[key] for key in (
+                "result", "status", "amount", "orderId", "trackId", "refNumber", "paidAt",
+            ) if key in data},
         }
 
     def _verified_result(self, payment, data: dict, verify_result: int) -> VerificationResult:
         if self._check_details(payment, data) != 1:
             raise PaymentGatewayError("زیبال پرداخت تأییدشده‌ای برای این تراکنش گزارش نکرد.")
         reference = data.get("refNumber")
-        if type(reference) is int and 0 < reference < 10**64:
+        if type(reference) is int and 0 < reference < 10**REFERENCE_MAX_LENGTH:
             reference_id = str(reference)
         elif (
             isinstance(reference, str)
-            and re.fullmatch(r"[0-9]{1,64}", reference)
+            and re.fullmatch(rf"[0-9]{{1,{REFERENCE_MAX_LENGTH}}}", reference)
             and int(reference) > 0
         ):
             # Preserve the gateway's representation, including leading zeros.
             reference_id = reference
         else:
             raise PaymentGatewayError("شماره مرجع گزارش زیبال نامعتبر است.")
-        try:
-            paid_at = parse_datetime(data.get("paidAt", ""))
-        except (TypeError, ValueError) as exc:
-            raise PaymentGatewayError("زمان پرداخت گزارش زیبال نامعتبر است.") from exc
-        if paid_at is None:
-            raise PaymentGatewayError("زمان پرداخت گزارش زیبال نامعتبر است.")
+        paid_at = parse_gateway_paid_at(
+            data.get("paidAt"), confirmed_timezone=self.paid_at_timezone,
+        )
         return VerificationResult(
             successful=True,
-            status=PaymentStatus.SUCCESSFUL,
+            status=PaymentStatus.MANUAL_REVIEW if paid_at.issue else PaymentStatus.SUCCESSFUL,
             transaction_id=payment.authority,
             reference_id=reference_id,
             message="پرداخت با موفقیت تأیید شد.",
-            raw=self._audit_data(data, verify_result),
+            raw={**self._audit_data(data, verify_result), "payment_time": paid_at.audit()},
+            gateway_paid_at=paid_at.value,
+            timestamp_issue=paid_at.issue,
         )
 
     def verify_payment(self, payment, callback_data: dict | None = None) -> VerificationResult:

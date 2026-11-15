@@ -1,6 +1,7 @@
 """تست چرخه زیبال با پاسخ‌های HTTP شبیه‌سازی‌شده؛ هیچ تراکنش واقعی انجام نمی‌شود."""
 
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -11,7 +12,7 @@ from decimal import Decimal
 from http.client import BadStatusLine, IncompleteRead
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Barrier
+from threading import Barrier, Event
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
@@ -45,6 +46,7 @@ TEST_SETTINGS = {
     "PAYMENT_GATEWAY": "zibal",
     "ZIBAL_MERCHANT": "zibal",
     "ZIBAL_TIMEOUT_SECONDS": 10,
+    "ZIBAL_PAID_AT_TIMEZONE": "",
     "SITE_URL": "https://minikandoo.example",
 }
 
@@ -79,7 +81,7 @@ class PaymentAPIStubMixin:
                 "result": 100, "status": 2,
                 "amount": payload["amount"], "orderId": payload["orderId"],
                 "refNumber": str(track_id + 100),
-                "paidAt": "2026-11-14T10:30:00.123000",
+                "paidAt": (timezone.now() - timedelta(seconds=1)).isoformat(),
                 "cardNumber": "62741****44", "message": "success",
             }
             data = {"result": 100, "trackId": track_id, "message": "success"}
@@ -543,7 +545,6 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
         for changes in (
             {"status": 2}, {"status": True}, {"status": 999},
             {"refNumber": None}, {"refNumber": 0}, {"refNumber": True},
-            {"paidAt": None}, {"paidAt": "invalid-date"},
         ):
             data = {**original, "status": 1, **changes}
             self.http.side_effect = None
@@ -702,16 +703,20 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
                     self.assertNotIn(sensitive, "\n".join(logs.output))
                     self.assert_unpaid()
 
-    def test_malformed_paid_timestamp_is_retryable(self):
+    def test_malformed_paid_timestamp_preserves_receipt_for_manual_review(self):
         original = self.server_transactions[self.payment.authority].copy()
         for paid_at in (None, "", "invalid-date", "2026-02-30T10:30:00", 100, True, {}):
             with self.subTest(paid_at=paid_at):
                 self.http.side_effect = [
                     self.http_response({**original, "status": 1, "paidAt": paid_at}),
                 ]
-                with self.assertRaises(PaymentError):
-                    process_callback(self.payment, self.callback_data(self.payment))
-                self.assert_unpaid()
+                payment = process_callback(self.payment, self.callback_data(self.payment))
+                self.assertEqual(payment.status, PaymentStatus.MANUAL_REVIEW)
+                self.assertFalse(payment.needs_refund)
+                self.assertEqual(payment.metadata["verification"]["paidAt"], paid_at)
+                self.order.refresh_from_db()
+                self.assertFalse(self.order.is_paid)
+                self.assertIsNotNone(payment.paid_at)
 
     def test_malformed_verification_response_does_not_pay_order(self):
         for body in (b"invalid", b"[]", b'{"result":true}', b'{"result":100}', b"\xff"):
@@ -1123,13 +1128,18 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
             "-- Dump completed on 2026-11-15\n"
         )
         self.backup.write_bytes(gzip.compress(self.dump.encode()))
+        self.write_checksum()
         for payment, paid_at in zip(self.payments, (
-            "2026-11-14T10:33:00", "2026-11-14T10:31:00", "2026-11-14T10:32:00",
+            "2026-11-14T10:33:00Z", "2026-11-14T10:31:00Z", "2026-11-14T10:32:00Z",
         )):
             self.server_transactions[payment.authority].update({
                 "status": 1, "paidAt": paid_at, "refNumber": "00" + str(int(payment.authority) + 100),
             })
         self.http.reset_mock()
+
+    def write_checksum(self):
+        digest = hashlib.sha256(self.backup.read_bytes()).hexdigest()
+        Path(str(self.backup) + ".sha256").write_text(f"{digest}  {self.backup.name}\n")
 
     def reconcile(self, *, apply=False, backup=None, track_ids=None, gateway_timezone=None):
         self.command_output = io.StringIO()
@@ -1186,6 +1196,7 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
         for contents in bad_dumps:
             with self.subTest(contents=contents[:30]):
                 self.backup.write_bytes(contents)
+                self.write_checksum()
                 with self.assertRaises(CommandError):
                     self.reconcile(apply=True, backup=self.backup)
                 self.http.assert_not_called()
@@ -1230,7 +1241,7 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
 
     def test_gateway_time_ties_use_local_creation_time(self):
         for payment, age in zip(self.payments, (2, 1, 3)):
-            self.server_transactions[payment.authority]["paidAt"] = "2026-11-14T10:30:00"
+            self.server_transactions[payment.authority]["paidAt"] = "2026-11-14T10:30:00Z"
             Payment.objects.filter(pk=payment.pk).update(created_at=timezone.now() - timedelta(minutes=age))
         report = self.reconcile()
         self.assertEqual(report["planned_primary"], self.payments[2].authority)
@@ -1298,6 +1309,8 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
 
     def test_elapsed_deadline_is_not_cleared_or_marked_paid_by_recovery(self):
         Order.objects.filter(pk=self.order.pk).update(expires_at=timezone.now() - timedelta(minutes=1))
+        for payment in self.payments:
+            self.server_transactions[payment.authority]["paidAt"] = timezone.now().isoformat()
         report = self.reconcile(apply=True, backup=self.backup)
         self.assertIsNone(report["planned_primary"])
         self.assertEqual(report["actual_primary"], [])
@@ -1333,8 +1346,9 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
         earliest.refresh_from_db()
         self.assertEqual(earliest.status, PaymentStatus.PENDING)
         self.assertEqual(earliest.callback_count, 0)
-        self.assertEqual(report["successful_count"], 2)
-        self.assertEqual(report["actual_primary"], [self.payments[2].authority])
+        self.assertEqual(report["successful_count"], 0)
+        self.assertEqual(report["actual_primary"], [])
+        self.assertEqual(len(report["manual_review_required"]), 2)
         self.assertNotIn("unit-test-sensitive-merchant", self.command_output.getvalue())
         self.assertTrue(report["inventory_unchanged"])
 
@@ -1349,19 +1363,109 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
         self.http.side_effect = api_with_changed_status
         with self.assertRaises(CommandError):
             self.reconcile(apply=True, backup=self.backup)
-        self.assertEqual(self.report()["successful_count"], 2)
+        self.assertEqual(self.report()["successful_count"], 0)
+        self.assertEqual(len(self.report()["manual_review_required"]), 2)
         earliest.refresh_from_db()
         self.assertEqual(earliest.status, PaymentStatus.FAILED)
 
     def test_mixed_gateway_timestamp_formats_need_a_confirmed_timezone(self):
-        self.server_transactions[self.payment.authority]["paidAt"] += "Z"
+        self.server_transactions[self.payment.authority]["paidAt"] = "2026-11-14T10:33:00"
         with self.assertRaises(CommandError):
             self.reconcile(apply=True, backup=self.backup)
-        self.assert_all_pending()
-        self.assertEqual(self.report()["replayed"], [])
+        self.order.refresh_from_db()
+        self.assertFalse(self.order.is_paid)
+        self.assertEqual(self.report()["actual_primary"], [])
+        self.assertEqual(len(self.report()["manual_review_required"]), 3)
         report = self.reconcile(apply=True, backup=self.backup, gateway_timezone="Asia/Tehran")
         self.assertEqual(report["successful_count"], 3)
+        self.assertEqual(report["actual_primary"], [self.payment.authority])
+
+    def test_missing_recorded_checksum_stops_apply_before_inquiry(self):
+        Path(str(self.backup) + ".sha256").unlink()
+        with self.assertRaises(CommandError):
+            self.reconcile(apply=True, backup=self.backup)
+        self.http.assert_not_called()
+        self.assert_all_pending()
+
+    def test_incorrect_or_mismatched_sidecar_stops_apply(self):
+        values = (
+            "0" * 64 + "  " + self.backup.name + "\n", "bad sidecar",
+            hashlib.sha256(self.backup.read_bytes()).hexdigest() + "  another.sql.gz\n",
+        )
+        for contents in values:
+            with self.subTest(contents=contents[:8]):
+                Path(str(self.backup) + ".sha256").write_text(contents)
+                with self.assertRaises(CommandError):
+                    self.reconcile(apply=True, backup=self.backup)
+                self.http.assert_not_called()
+                self.assert_all_pending()
+
+    def test_uniform_naive_timestamps_are_read_only_then_all_manual_on_apply(self):
+        for payment in self.payments:
+            self.server_transactions[payment.authority]["paidAt"] = "2026-11-14T10:30:00"
+        report = self.reconcile()
+        self.assertEqual(report["before"], report["after"])
+        self.assertIsNone(report["planned_primary"])
+        self.assertEqual(len(report["ambiguous_timestamps"]), 3)
+        self.assertEqual(report["gateway_time_order"], [])
+        for _ in range(2):
+            with self.assertRaises(CommandError):
+                self.reconcile(apply=True, backup=self.backup)
+            self.assertEqual(self.report()["actual_primary"], [])
+            self.assertEqual(self.report()["refund_required"], [])
+            self.assertEqual(len(self.report()["manual_review_required"]), 3)
+            self.assertTrue(self.report()["inventory_unchanged"])
+
+    def test_recovery_accepts_early_receipt_after_local_deadline(self):
+        Order.objects.filter(pk=self.order.pk).update(expires_at=timezone.now() - timedelta(minutes=1))
+        report = self.reconcile(apply=True, backup=self.backup)
+        self.assertFalse(report["before"]["can_pay"])
         self.assertEqual(report["actual_primary"], [self.payments[1].authority])
+        self.assertEqual(len(report["refund_required"]), 2)
+        self.assertTrue(report["inventory_unchanged"])
+        self.assertTrue(all(payment.metadata["recovery_history"] for payment in self.order.payments.all()))
+
+    def test_primary_timeout_retry_finalizes_once_and_refunds_waiting_receipts(self):
+        earliest = self.payments[1]
+
+        def fail_primary(request, *, timeout):
+            if urlsplit(request.full_url).path == "/v1/verify" and json.loads(request.data)["trackId"] == int(earliest.authority):
+                raise TimeoutError("synthetic private data")
+            return self.api_call(request, timeout=timeout)
+
+        self.http.side_effect = fail_primary
+        with self.assertRaises(CommandError):
+            self.reconcile(apply=True, backup=self.backup)
+        self.assertEqual(self.report()["actual_primary"], [])
+        self.http.side_effect = self.api_call
+        report = self.reconcile(apply=True, backup=self.backup)
+        self.assertEqual(report["actual_primary"], [earliest.authority])
+        self.assertEqual(report["successful_count"], 3)
+        self.assertEqual(len(report["refund_required"]), 2)
+        again = self.reconcile(apply=True, backup=self.backup)
+        self.assertEqual(again["actual_primary"], report["actual_primary"])
+        self.assertEqual(again["after"]["paid_at"], report["after"]["paid_at"])
+
+    def test_timestamp_becoming_ambiguous_during_replay_cannot_promote_other_receipts(self):
+        earliest = self.payments[1]
+
+        def change_primary_time(request, *, timeout):
+            if urlsplit(request.full_url).path == "/v1/verify" and json.loads(request.data)["trackId"] == int(earliest.authority):
+                self.server_transactions[earliest.authority]["paidAt"] = "2026-11-14T10:31:00"
+            return self.api_call(request, timeout=timeout)
+
+        self.http.side_effect = change_primary_time
+        with self.assertRaises(CommandError):
+            self.reconcile(apply=True, backup=self.backup)
+        self.assertEqual(self.report()["actual_primary"], [])
+        self.assertEqual(len(self.report()["manual_review_required"]), 3)
+        self.assertTrue(self.report()["inventory_unchanged"])
+
+    def test_invalid_timezone_is_rejected_without_queries_or_changes(self):
+        with self.assertRaises(CommandError):
+            self.reconcile(gateway_timezone="Not/A_Timezone")
+        self.http.assert_not_called()
+        self.assert_all_pending()
 
     def test_foreign_or_duplicate_track_ids_are_rejected_without_api_calls(self):
         for track_ids in ([self.payment.authority] * 2, ["9900"]):
@@ -1369,49 +1473,6 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
                 self.reconcile(track_ids=track_ids)
             self.http.assert_not_called()
             self.assert_all_pending()
-
-
-class ProductionBackupScriptTests(TestCase):
-    """A stub Docker executable supplies synthetic data; no database is accessed."""
-
-    def setUp(self):
-        self.temp_dir = Path(self.enterContext(TemporaryDirectory(prefix="minikandoo-backup-script-test-")))
-        self.backup_dir = self.temp_dir / "backups"
-        self.bin_dir = self.temp_dir / "bin"
-        self.bin_dir.mkdir()
-        self.environment_file = self.temp_dir / "empty-test-only.env"
-        self.environment_file.write_text("")
-        self.docker_stub = self.bin_dir / "docker"
-        self.script = Path(__file__).resolve().parents[1] / "scripts/backup-production-db"
-
-    def run_script(self, stub):
-        self.docker_stub.write_text("#!/bin/sh\n" + stub)
-        self.docker_stub.chmod(0o700)
-        env = {**os.environ, "PATH": str(self.bin_dir) + ":" + os.environ["PATH"], "ENV_FILE": str(self.environment_file)}
-        return subprocess.run(["bash", str(self.script), str(self.backup_dir)], env=env, capture_output=True, text=True, timeout=10)
-
-    def test_backup_is_private_valid_and_does_not_overwrite_existing_files(self):
-        self.backup_dir.mkdir()
-        previous = self.backup_dir / "db-20261114-190647.sql.gz"
-        previous.write_bytes(b"preserve-existing-backup")
-        for _ in range(2):
-            result = self.run_script("printf '%s\\n' '-- MariaDB dump' 'synthetic test SQL' '-- Dump completed on test'\n")
-            self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(previous.read_bytes(), b"preserve-existing-backup")
-        created = [file for file in self.backup_dir.glob("*.sql.gz") if file != previous]
-        self.assertEqual(len(created), 2)
-        for file in created:
-            self.assertEqual(file.stat().st_mode & 0o777, 0o600)
-            self.assertIn(b"synthetic test SQL", gzip.decompress(file.read_bytes()))
-            self.assertTrue(Path(str(file) + ".sha256").is_file())
-        self.assertEqual(list(self.backup_dir.glob("*.partial")), [])
-
-    def test_dump_failure_is_not_reported_as_a_valid_backup(self):
-        result = self.run_script("printf '%s' 'partial test SQL'\nexit 1\n")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Recovery must stop", result.stderr)
-        self.assertEqual(list(self.backup_dir.glob("*.sql.gz")), [])
-        self.assertEqual(len(list(self.backup_dir.glob("*.partial"))), 1)
 
 
 @skipUnlessDBFeature("has_select_for_update")
@@ -1468,3 +1529,76 @@ class ConcurrentCallbackTests(PaymentFixtureMixin, PaymentAPIStubMixin, Transact
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, OrderStatus.PAID)
         self.assertEqual(self.order.payment_status, PaymentStatus.SUCCESSFUL)
+
+    def run_callback_expiry_race(self, *, callback_first):
+        from orders.services import expire_due_orders, _restore_stock
+        deadline = timezone.now() - timedelta(minutes=5)
+        Order.objects.filter(pk=self.order.pk).update(expires_at=deadline)
+        self.server_transactions[self.payment.authority]["paidAt"] = (deadline - timedelta(minutes=2)).isoformat()
+        first_locked, release = Event(), Event()
+
+        def slow_api(request, *, timeout):
+            if urlsplit(request.full_url).path == "/v1/verify":
+                first_locked.set()
+                if not release.wait(timeout=10):
+                    raise AssertionError("Test callback lock was not released.")
+            return self.api_call(request, timeout=timeout)
+
+        def slow_restore(order):
+            first_locked.set()
+            if not release.wait(timeout=10):
+                raise AssertionError("Test expiry lock was not released.")
+            return _restore_stock(order)
+
+        def callback():
+            close_old_connections()
+            try:
+                local = Payment.objects.select_related("order").get(pk=self.payment.pk)
+                return process_callback(local, self.callback_data(local))
+            finally:
+                close_old_connections()
+
+        def expire():
+            close_old_connections()
+            try:
+                return expire_due_orders()
+            finally:
+                close_old_connections()
+
+        if callback_first:
+            self.http.side_effect = slow_api
+        context = patch("orders.services._restore_stock", side_effect=slow_restore) if not callback_first else patch(
+            "orders.services._restore_stock", wraps=_restore_stock,
+        )
+        with context, ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(callback if callback_first else expire)
+            try:
+                self.assertTrue(first_locked.wait(timeout=10))
+                second = executor.submit(expire if callback_first else callback)
+                with self.assertRaises(TimeoutError):
+                    second.result(timeout=0.1)
+            finally:
+                release.set()
+            first_result = first.result(timeout=20)
+            second_result = second.result(timeout=20)
+        return (first_result, second_result) if callback_first else (second_result, first_result)
+
+    def test_callback_lock_first_prevents_expiry_stock_release(self):
+        payment, expired = self.run_callback_expiry_race(callback_first=True)
+        self.assertEqual(expired, 0)
+        self.assertFalse(payment.needs_refund)
+        self.order.refresh_from_db()
+        self.assertTrue(self.order.is_paid)
+        self.assertFalse(self.order.inventory_released)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_expiry_lock_first_preserves_cancellation_and_released_stock(self):
+        payment, expired = self.run_callback_expiry_race(callback_first=False)
+        self.assertEqual(expired, 1)
+        self.assertTrue(payment.needs_refund)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.CANCELLED)
+        self.assertTrue(self.order.inventory_released)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 5)

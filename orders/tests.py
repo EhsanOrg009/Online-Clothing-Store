@@ -435,15 +435,16 @@ class OrderAdminTests(OrderFixtureMixin, TestCase):
         admin_instance = OrderAdmin(Order, AdminSite())
         request = self._admin_request()
 
+        mark_order_paid(self.order)
         obj = Order.objects.get(pk=self.order.pk)
         obj.tracking_number = "TRK-TEST-123"
         obj.customer_note = "یادداشت ادمین"
-        obj.status = OrderStatus.PAID  # گذار مجاز از «در انتظار پرداخت»
+        obj.status = OrderStatus.PREPARING
         admin_instance.save_model(request, obj, form=None, change=True)
 
         self.order.refresh_from_db()
         # هم وضعیت تغییر کرده و هم فیلدهای دیگر حفظ شده‌اند (باگ قبلی: دور ریخته می‌شدند)
-        self.assertEqual(self.order.status, OrderStatus.PAID)
+        self.assertEqual(self.order.status, OrderStatus.PREPARING)
         self.assertEqual(self.order.tracking_number, "TRK-TEST-123")
         self.assertEqual(self.order.customer_note, "یادداشت ادمین")
 

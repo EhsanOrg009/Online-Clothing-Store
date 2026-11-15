@@ -246,13 +246,15 @@ docker compose exec web python manage.py shell
 
 ### Docker production configuration
 
-The base `docker-compose.yml` is intended for production; the development override is omitted when you explicitly specify the base file:
+MiniKandoo production uses the base and production Compose files through `scripts/compose-production`, which loads `.env.production` and omits the development override. Review existing server changes, backup storage permissions and retention dry-run before deployment:
 
 ```bash
-docker compose -f docker-compose.yml build
-docker compose -f docker-compose.yml up -d
-docker compose -f docker-compose.yml exec web python manage.py createsuperuser
+scripts/compose-production config --quiet
+scripts/compose-production build web db-backup
+scripts/compose-production ps
 ```
+
+For an existing server, take and verify a fresh backup, pause writers in the approved maintenance window and apply the reviewed migration plan before starting the new web and backup services. The [deployment guide](docs/deployment-production-fa.md) distinguishes this sequence from initializing a fresh database.
 
 Important production settings include:
 
@@ -262,13 +264,16 @@ Important production settings include:
 | `SECRET_KEY` | Required, strong random value | Django signing and security |
 | `ZIBAL_MERCHANT` | Required, real Zibal merchant in production | Zibal API authentication |
 | `ZIBAL_TIMEOUT_SECONDS` | `10` by default | HTTP timeout in seconds |
+| `ZIBAL_PAID_AT_TIMEZONE` | Empty until officially confirmed | IANA timezone for gateway timestamps without an offset |
 | `SITE_URL` | Storefront origin; HTTPS in production | Builds the payment callback URL |
 | `DATABASE_PASSWORD` | Required, strong password | Database authentication |
 | `ALLOWED_HOSTS` | Your real domain | Allowed host names |
 | `CSRF_TRUSTED_ORIGINS` | Full origins, including `https://` | CSRF protection behind the domain |
 | `SECURE_SSL_REDIRECT` | `True` when HTTPS is configured | Redirects HTTP requests to HTTPS |
 | `SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` | `True` when HTTPS is configured | Sends cookies only over HTTPS |
-| `MIGRATE_ON_START` | `1` by default | Runs migrations during startup when enabled |
+| `MIGRATE_ON_START` | `0` in the production wrapper configuration | Apply reviewed migrations once in a maintenance window |
+| `BACKUP_HOST_DIR` | `/root/minikandoo-backups` | Persistent bind mount for the Compose backup service |
+| `BACKUP_RETENTION_MODE` | `dry-run` until reviewed, then `apply` | Enable safe managed-file retention after the initial review |
 
 If Nginx or Caddy terminates HTTPS in front of the application, configure the reverse proxy to forward the original scheme correctly. Otherwise, `SECURE_SSL_REDIRECT` can cause redirect loops. Review the proxy and Django security settings together before deployment.
 
@@ -289,7 +294,7 @@ Dockerfile
 
 The entrypoint waits for the database, collects static files, runs configured startup tasks, and launches the application. The database configuration enables `utf8mb4`, `READ-COMMITTED`, and InnoDB settings.
 
-### Moving a local database into Docker
+### Moving a development database into Docker
 
 Back up the local database first:
 
@@ -303,7 +308,7 @@ Import the backup into the container, substituting your configured database cred
 docker compose exec -T db mariadb -u root -p clothing_shop < backup.sql
 ```
 
-Copy uploaded media files when applicable:
+These import commands are for an isolated development database. For production, use the approved backup and restore procedure in [database backup operations](docs/production-database-backups.md). Copy uploaded media files when applicable:
 
 ```bash
 docker compose cp media/. web:/app/media/
@@ -518,6 +523,7 @@ Zibal is the only active payment gateway. Its integration follows the [official 
 PAYMENT_GATEWAY=zibal
 ZIBAL_MERCHANT=zibal
 ZIBAL_TIMEOUT_SECONDS=10
+ZIBAL_PAID_AT_TIMEZONE=
 SITE_URL=http://localhost:8000
 ORDER_RESERVATION_MINUTES=30
 ```
@@ -534,10 +540,13 @@ The literal `zibal` merchant is Zibal's public test account and is allowed only 
 | Recover an already verified payment / inspect an unpaid transaction | `POST https://gateway.zibal.ir/v1/inquiry` |
 
 - The database keeps amounts in Toman. Only the adapter converts `order.total` to integer Rial (`×10`).
-- Zibal's `trackId` is stored in the existing unique `Payment.authority` field. Verified `refNumber` is stored in `reference_id`; no schema migration or financial-history rewrite is needed.
+- Zibal's `trackId` is stored in the existing unique `Payment.authority` field. `reference_id` accepts positive integers or up to 64 ASCII digits and preserves string leading zeros; 64 is the local storage limit, not a documented Zibal bound.
 - The existing `/payments/callback/` URL accepts Zibal's GET parameters `trackId`, `success`, `status` and the `orderId` sent with the request. Malformed, duplicated or mismatched parameters cannot change an order.
 - A verified payment requires server result `100`, status `1`, and matching amount/order identifiers with a valid reference. Verify result `201` is followed by inquiry; that code alone never marks an order paid.
-- Callback processing locks the order and payment. Duplicate callbacks repeat no fulfillment; an additional actual payment for an already paid or cancelled order is flagged for manual refund.
+- `Payment.gateway_paid_at` stores the independently interpreted gateway time. A delayed callback can accept a payment made within the deadline while the order and reservation remain active. Callback arrival does not determine lateness.
+- Offset-bearing timestamps use their actual offset. Zibal's official examples omit offsets and do not document a timezone; without written confirmation and explicit configuration, those receipts require `manual_review` with no automatic fulfillment or refund decision.
+- Callback and expiration lock the order before payment/variant rows. Cancelled orders and released reservations are never revived. Extra successful receipts with reliable timestamps are flagged for refund handling; duplicate callbacks repeat no fulfillment.
+- Two additive migrations introduce gateway time, manual review and the reservation-release flag while preserving existing local timestamp semantics and financial history.
 - API errors preserve retryable transactions. A server-reported cancellation or failure is handled separately from connection/response errors.
 - The redirect page sends only the storefront origin as `Referer`, as required by Zibal, including automatic navigation without JavaScript. Global referrer settings and frontend styling stay unchanged.
 - Credentials and card data are never included in the redirect URL, frontend code, stored verification data or error logs.
@@ -547,139 +556,29 @@ Automated payment tests mock HTTP responses; browser QA intercepts gateway navig
 ---
 ## 🚀 Production Deployment
 
-Production deployment requires a valid secret configuration, a production database, HTTPS, static-file collection, a production application server, and a scheduled task for expiring unpaid orders.
+MiniKandoo runs Django/Gunicorn, Nginx, MariaDB, Redis and the automated `db-backup` scheduler in the existing production Compose project. Follow the [Persian deployment guide](docs/deployment-production-fa.md), [payment recovery runbook](docs/zibal-verification-recovery.md) and [database backup operations](docs/production-database-backups.md).
 
-### 1. Configure environment variables
+For a fresh installation, create a private `.env.production` from its example. Preserve the existing file and local server configuration during an update. Use `scripts/compose-production` for every production stack operation. Review and approve deployment before rebuilding or recreating running production services.
 
-```bash
-cp .env.example .env
+The backup container performs an initial backup, then attempts one at each UTC half-hour boundary. It uses the existing internal MariaDB service, secure client option files, shared flock, gzip validation and recorded SHA256 sidecars. Completed names are unique UTC filenames. Retention keeps the most recent 48 plus the latest backup on each of the previous seven UTC days; historical files remain untouched. Review the initial dry-run before enabling deletion and set capacity limits from real measurements.
+
+```sh
+scripts/compose-production config --quiet
+scripts/compose-production ps
+scripts/compose-production logs --tail=100 db-backup
+scripts/compose-production run --rm --no-deps -T db-backup inspect
+scripts/backup-production-db
 ```
 
-Set production values in `.env` (the values below are examples and must be adapted to your host):
+Back up before migrations. Apply the two new payment/order migrations once using the reviewed web image and verify readiness before payment recovery. Keep `ZIBAL_PAID_AT_TIMEZONE` empty until Zibal confirms an IANA timezone. Inquiry is read-only by default; recovery apply requires a fresh validated backup and never issues a refund. Production restoration requires explicit human approval and a successful isolated restore test of the selected file.
 
-```env
-DJANGO_SETTINGS_MODULE=config.settings.production
-DEBUG=False
-SECRET_KEY=<strong-random-secret-at-least-50-characters>
-ALLOWED_HOSTS=shop.example.com
-CSRF_TRUSTED_ORIGINS=https://shop.example.com
+Unpaid-order expiration uses the existing management command through the same wrapper:
 
-DATABASE_PASSWORD=<strong-database-password>
-
-PAYMENT_GATEWAY=zibal
-ZIBAL_MERCHANT=<merchant-from-zibal-panel>
-ZIBAL_TIMEOUT_SECONDS=10
-SITE_URL=https://shop.example.com
-
-SESSION_COOKIE_SECURE=True
-CSRF_COOKIE_SECURE=True
-SECURE_SSL_REDIRECT=True
-SECURE_HSTS_SECONDS=31536000
+```sh
+scripts/compose-production exec -T web python manage.py expire_pending_orders
 ```
 
-The production settings are designed to refuse startup when critical values such as `SECRET_KEY`, `ALLOWED_HOSTS`, or the database password are missing or weak.
-
-### 2. Create a restricted database user
-
-Use a dedicated account with permissions limited to this application's database. Adapt the host, database, and password to your environment:
-
-```sql
-CREATE USER 'shop_prod'@'127.0.0.1' IDENTIFIED BY '<strong-password>';
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER
-  ON clothing_shop.* TO 'shop_prod'@'127.0.0.1';
-FLUSH PRIVILEGES;
-```
-
-Do not grant `ALL ON *.*` to an application account in production. If your deployment runs tests, provision a separate test database and grant only the permissions needed for that database to a separate testing account.
-
-Apply migrations and collect static files:
-
-```bash
-uv run python manage.py migrate
-uv run python manage.py collectstatic --noinput
-```
-
-### 3. Schedule unpaid-order expiration
-
-Unpaid orders should be expired periodically so their reserved stock can be released. For example, run the command every five minutes using cron, adjusting the paths for your deployment:
-
-```cron
-*/5 * * * * cd /path/to/shop && /path/to/.venv/bin/python manage.py expire_pending_orders
-```
-
-### 4. Run Gunicorn
-
-Install the production dependencies and start the WSGI application:
-
-```bash
-uv sync --extra production
-uv run gunicorn config.wsgi:application --workers 3 --bind 127.0.0.1:8000
-```
-
-For an ASGI deployment, the project documentation provides this alternative:
-
-```bash
-uv run gunicorn config.asgi:application -k uvicorn.workers.UvicornWorker --bind 127.0.0.1:8000
-```
-
-Use the server type and worker configuration appropriate for the final deployment. Keep the application server bound to a private interface when it is intended to sit behind a reverse proxy.
-
-### 5. Nginx reverse proxy example
-
-This example redirects HTTP to HTTPS and proxies requests to Gunicorn. Update the domain, certificate paths, and filesystem paths before using it:
-
-```nginx
-server {
-    listen 80;
-    server_name shop.example.com;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name shop.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/shop.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/shop.example.com/privkey.pem;
-
-    client_max_body_size 20m;
-
-    location /static/ {
-        alias /path/to/shop/staticfiles/;
-        expires 30d;
-        add_header Cache-Control "public, immutable";
-    }
-
-    location /media/ {
-        alias /path/to/shop/media/;
-        expires 7d;
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-Forwarding `X-Forwarded-For` is important for IP-based rate limiting. Configure Django's proxy/secure settings to match the reverse proxy and trust only headers from a proxy you control.
-
-### 6. Use a shared cache with multiple workers
-
-A local-memory cache is separate for each worker process. With multiple workers, rate-limit counts may therefore be inconsistent unless a shared cache is configured. The project documentation suggests Redis:
-
-```bash
-uv add django-redis
-```
-
-```env
-CACHE_URL=redis://127.0.0.1:6379/1
-```
-
-Confirm that the project's settings read `CACHE_URL` and that Redis is configured and protected before relying on it in production.
+Preserve the existing operational schedule for this command. The new backup scheduler runs entirely in Docker and requires no host Cron or systemd timer. Same-host backups protect against database failures but not complete VPS/disk loss; off-site transfer is a separate authorized enhancement.
 
 ---
 ## 🛠️ Troubleshooting

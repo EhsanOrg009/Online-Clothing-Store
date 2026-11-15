@@ -55,7 +55,7 @@ class Payment(models.Model):
         default=False,
         db_index=True,
         help_text=_(
-            "پرداخت موفق برای سفارشی که پیش از تأیید، لغو یا منقضی شده بود. "
+            "دریافت موفق وجه برای سفارش لغوشده، پرداخت پس از مهلت یا پرداخت اضافه. "
             "باید به‌صورت دستی به مشتری بازگردانده شود."
         ),
     )
@@ -66,6 +66,13 @@ class Payment(models.Model):
     created_at = models.DateTimeField(_("تاریخ ایجاد"), auto_now_add=True, db_index=True)
     verified_at = models.DateTimeField(_("زمان Verify"), null=True, blank=True)
     paid_at = models.DateTimeField(_("زمان پرداخت"), null=True, blank=True)
+    gateway_paid_at = models.DateTimeField(
+        _("زمان پرداخت گزارش‌شده توسط درگاه"), null=True, blank=True,
+        help_text=_(
+            "paidAt درگاه با timezone مشخص؛ مستقل از زمان ثبت محلی paid_at و verified_at. "
+            "زمان نامعتبر/مبهم در metadata برای بررسی دستی حفظ می‌شود."
+        ),
+    )
 
     class Meta:
         verbose_name = "تراکنش پرداخت"
@@ -87,3 +94,7 @@ class Payment(models.Model):
     @property
     def is_pending(self) -> bool:
         return self.status == PaymentStatus.PENDING
+
+    @property
+    def requires_manual_review(self) -> bool:
+        return self.status == PaymentStatus.MANUAL_REVIEW

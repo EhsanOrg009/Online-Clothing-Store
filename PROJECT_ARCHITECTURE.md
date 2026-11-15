@@ -201,6 +201,7 @@ Order                     ★ Snapshot تغییرناپذیر
 ├── tracking_code / admin_note
 │
 ├── expires_at            مهلت پرداخت
+├── inventory_released    آزادسازی یک‌بارهٔ رزرو تحت قفل سفارش
 ├── paid_at / shipped_at / delivered_at / cancelled_at
 └── created_at / updated_at
 
@@ -222,11 +223,13 @@ Payment
 ├── order → Order
 ├── gateway              نام درگاه (zibal؛ مقادیر تاریخی بدون تغییر حفظ می‌شوند)
 ├── amount  Decimal      ★ از order.total؛ هرگز از Client
-├── status               PENDING | SUCCESSFUL | FAILED | CANCELLED | EXPIRED
+├── status               PENDING | SUCCESSFUL | FAILED | CANCELLED | EXPIRED | MANUAL_REVIEW
 ├── authority            trackId زیبال؛ نام فیلد برای سازگاری سوابق حفظ شده است
 ├── transaction_id / reference_id
-├── metadata (JSON)      شامل redirect_url
-├── verified_at / paid_at
+├── metadata (JSON)      redirect_url، raw paidAt، verification/recovery audit و decision
+├── verified_at / paid_at زمان‌های ثبت محلی، با معنای قبلی
+├── gateway_paid_at       زمان درگاه با timezone قابل اتکا؛ nullable
+├── needs_refund          نیازمند رسیدگی انسانی، بدون refund خودکار
 ├── callback_count       شمارنده‌ی فراخوانی‌های Callback
 └── error_message
 ```
@@ -299,7 +302,7 @@ pending_payment ──► paid ──► preparing ──► ready_to_ship ─�
 uv run python manage.py expire_pending_orders
 ```
 
-این دستور باید با cron هر چند دقیقه اجرا شود (جزئیات در README).
+این دستور باید دوره‌ای از روند عملیاتی موجود اجرا شود؛ در production از `scripts/compose-production exec -T web python manage.py expire_pending_orders` استفاده می‌شود. انقضا پس از گرفتن قفل سفارش، paid بودن و آزادسازی رزرو را دوباره بررسی می‌کند. callbackی که واقعاً درون مهلت پرداخت شده است می‌تواند دیر برسد و سفارش فعال را بپردازد؛ پس از آزادسازی موجودی، سفارش احیا نمی‌شود.
 
 ---
 
@@ -392,6 +395,7 @@ payments/gateways/
 │                 ├── verify_payment(payment, callback_data) -> VerificationResult
 │                 └── get_payment_url(payment) -> str
 ├── zibal.py      درخواست، تایید و استعلام JSON از API رسمی زیبال
+├── zibal_time.py تفسیر offset واقعی یا IANA رسماً تأییدشده؛ زمان مبهم به بررسی دستی
 └── registry.py   انتخاب بر اساس PAYMENT_GATEWAY
 ```
 
@@ -412,11 +416,13 @@ payments/gateways/
    ├─ یافتن Payment زیبال با trackId و تطبیق orderId
    └─ process_callback(payment, callback_data)
         ├─ قفل سفارش و سپس Payment؛ افزایش callback_count
-        ├─ ⛔ Idempotency: اگر قبلاً SUCCESSFUL/CANCELLED → بازگشت
+        ├─ ⛔ Idempotency: SUCCESSFUL تکراری اعمال نمی‌شود؛ CANCELLED با موفقیت واقعی قابل بررسی دوباره است
         ├─ gateway.verify_payment()      ★ تأیید سمت سرور
         │    ├─ POST /v1/verify؛ برای 201/202 استعلام /v1/inquiry
         │    └─ تطبیق status=1، مبلغ ریالی، orderId و شماره مرجع
-        └─ mark_order_paid؛ وجه اضافه/سفارش لغوشده → needs_refund
+        ├─ تفسیر paidAt و مقایسهٔ مستقل از زمان ورود callback
+        ├─ زمان مبهم/آینده/رزرو نامعتبر → MANUAL_REVIEW
+        └─ mark_order_paid فقط برای رزرو سالم و پرداخت در مهلت؛ وجه late/اضافه معتبر → needs_refund
 ```
 
 ### سه لایه‌ی دفاعی
@@ -432,6 +438,8 @@ payments/gateways/
 ### پیکربندی زیبال
 
 `PAYMENT_GATEWAY=zibal` و `ZIBAL_MERCHANT` از محیط خوانده می‌شوند؛ `SITE_URL` برای ساخت Callback استفاده می‌شود. تومان در دیتابیس باقی می‌ماند و تبدیل ریال فقط در adapter انجام می‌شود. جزئیات در [راهنمای پرداخت زیبال](docs/zibal-payment.md).
+
+`ZIBAL_PAID_AT_TIMEZONE` پیش‌فرض خالی دارد؛ نمونه‌های رسمی بدون offset، timezone را مشخص نمی‌کنند. تنظیم `TIME_ZONE` Django یا timezone سرور برای آن‌ها فرض نمی‌شود. raw `paidAt` حفظ و receipt مبهم بدون fulfillment/refund خودکار در manual review ثبت می‌شود. `Payment.gateway_paid_at` جدا از زمان‌های محلی است. callback با ترتیب `Order → Payment → ProductVariant` و انقضا با `Order → ProductVariant`، واریانت‌ها به ترتیب PK، سریالی می‌شوند. [ابزار recovery](docs/zibal-verification-recovery.md) پیش‌فرض Inquiry خواندنی دارد و apply نیازمند بکاپ تازه با SHA256 sidecar منطبق است.
 
 ---
 
@@ -485,7 +493,7 @@ def decrement_stock(self, quantity: int) -> bool:
 | انقضای مهلت پرداخت | `expire_due_orders` |
 | لغوشدن از مسیر Admin | `cancel_order` |
 
-`_restore_stock` فقط برای سفارش‌هایی اجرا می‌شود که واقعاً از حالت انتظار خارج شده‌اند، و `cancel_order` Idempotent است — فراخوانی دوباره موجودی را دو بار برنمی‌گرداند.
+`_restore_stock` زیر قفل سفارش، واریانت‌ها را به ترتیب PK قفل و `inventory_released` را ثبت می‌کند. `cancel_order` و job انقضا idempotent هستند؛ موجودی دوبار آزاد نمی‌شود. callback پس از لغو/آزادسازی حتی با timestamp زودهنگام معتبر، رزرو را دوباره برقرار نمی‌کند.
 
 ---
 
@@ -643,50 +651,24 @@ Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
 
 ## تست
 
-```bash
-uv run python manage.py test
+آزمون‌های کامل در دیتابیس‌های جداگانه اجرا می‌شوند؛ credential تولید یا دیتابیس فروشگاه fixture نیستند:
+
+```sh
+PYTHONPATH=scripts/qa .venv/bin/python manage.py test --settings=shop_test_settings --noinput
+.venv/bin/python scripts/qa/test_backup_stack.py
 ```
 
-**۲۰۸ تست** در ۷ گروه:
+suite شامل common، accounts، products، cart، orders، payments و store است. تست‌های پرداخت از HTTP شبیه‌سازی‌شده استفاده می‌کنند. پنج تست قفل ردیفی روی SQLite skip و روی MariaDB اجرا می‌شوند؛ callback-first و expiry-first نیز با threadهای واقعی و قفل DB بررسی می‌شوند. forward/backward migration، زمان‌های دارای offset/بدون offset/DST/future، referenceهای رشته‌ای/نامعتبر، duplicate payment، recovery retry و موجودی پوشش دارند.
 
-| اپ | تعداد | پوشش |
-| --- | --- | --- |
-| `common` | ۲۴ | نرمال‌سازی ارقام، اعتبارسنجی‌ها، فیلترهای قالب، Rate Limiter، داشبورد ادمین |
-| `accounts` | ۲۸ | درخواست/تأیید OTP، انقضا، سقف تلاش، ارقام فارسی، پروفایل، آدرس |
-| `products` | ۲۴ | قیمت‌گذاری، Manager ها، محدودیت واریانت، مدل‌ها |
-| `cart` | ۲۷ | سرویس‌ها، سقف تعداد، HTMX، ایزوله‌سازی مهمان، ادغام |
-| `orders` | ۳۰ | Snapshot، Overselling، لغو، انقضا، گذار وضعیت، ارسال |
-| `payments` | ۸۲ | درخواست/تایید/استعلام زیبال، خطاهای API، Callback، Idempotency، صفحات نتیجه، خرید کامل و همزمانی |
-| `store` | ۳۷ | همه‌ی صفحات، فیلترها، جستجو، جزئیات محصول، هدرهای امنیتی |
+worker بکاپ با client مصنوعی و پوشه‌های موقت، dump/gzip/checksum failure، atomic publication، locks، recent/daily overlap، legacy preservation، partial cleanup، dry-run و ظرفیت را بررسی می‌کند. driver Docker image را واقعاً build و روی project یکتا، manual/scheduler، lock بین کانتینرها، restart و failure recovery و SQL restore واقعی به target موقت را می‌آزماید. هیچ volume موجود حذف نمی‌شود. CI همین suite SQLite و Docker/MariaDB را اجرا می‌کند؛ موفقیت CI باید از نتیجهٔ runner خوانده شود.
 
-### تست‌های کلیدی
-
-```
-OversellingProtectionTests
-  └─ test_second_order_cannot_exceed_stock    ثبت دو سفارش همزمان
-
-CallbackTests
-  ├─ test_callback_is_idempotent              ارسال دوباره بدون اثر
-  ├─ test_forged_success_does_not_override_failed_server_transaction
-  └─ test_invalid_callback_fields_do_not_mutate_order_or_payment
-
-VerifyOtpTests
-  ├─ test_challenge_is_locked_after_max_attempts
-  └─ test_max_attempts_reached_before_any_guess
-
-FullPurchaseFlowTests
-  └─ test_full_flow                           سرانجام‌به‌سرانجام
-```
-
-### نکته‌ی اجرایی
-
-تست‌های پرداخت پاسخ HTTP زیبال را Mock می‌کنند و هیچ درخواست مالی واقعی نمی‌فرستند. حساب تست رسمی فقط با `DEBUG=True` مجاز است. سه تست همزمانی برای دیتابیس دارای `select_for_update` هستند و روی SQLite اجرا نمی‌شوند.
+شمارش و نتیجهٔ واقعی اجرای نهایی در [گزارش بازیابی](docs/zibal-verification-recovery.md) ثبت شده است. suite محلی یا restore مصنوعی به معنی فعال‌بودن production backup یا بازیابی سه تراکنش واقعی نیست.
 
 ---
 
 ## زیرساخت Docker
 
-کل پروژه‌ی اجرا (Python 3.14، Node، MariaDB، Tailwind، Gunicorn) داکرایز شده تا انتقال از محیط توسعه به سرور اصلی تنها با `docker compose up` انجام شود.
+کل پروژه‌ی اجرا (Python 3.14، Node، MariaDB، Tailwind، Gunicorn، Nginx، Redis و scheduler بکاپ) با همان production Compose stack مدیریت می‌شود. عملیات production از `scripts/compose-production` عبور می‌کند و تنظیمات موجود سرور پیش از استقرار بازبینی و حفظ می‌شوند.
 
 ### چرا سه مرحله در Dockerfile؟
 
@@ -706,6 +688,8 @@ Stage 3  runtime │ python:3.14-slim      │ فقط venv + runtime deps   → 
 | --- | --- |
 | `docker-compose.yml` | پایه و Production: سرویس‌های `web` و `db`، بدون Hot-Reload |
 | `docker-compose.override.yml` | توسعه: `runserver`، `DEBUG=True`، Mount کردن مخزن روی `/app` |
+| `docker-compose.production.yml` | Nginx، Redis، Certbot و `db-backup` در همان project؛ شبکهٔ داخلی، bind mount بکاپ و health dependency |
+| `scripts/compose-production` | base + production و فایل محیط خصوصی؛ بدون development override |
 | `.docker.env.example` | فقط مرجع متغیرها؛ **نباید روی `.env` نوشته شود** |
 
 نکته‌ی مهم اینکه `DJANGO_SETTINGS_MODULE` در `docker-compose.yml` (فایل پایه) به‌صورت **قاطع** روی `config.settings.production` تنظیم شده تا مقدار `development` موجود در `.env` محلی به آن نشت نکند؛ فایل override آن را صراحتاً به `development` برمی‌گرداند.
@@ -720,6 +704,12 @@ Stage 3  runtime │ python:3.14-slim      │ فقط venv + runtime deps   → 
 4. **Seed:** فقط زمانی که `SEED_ON_START=1` (پیش‌فرض `0`).
 
 `docker/db/init/01-load-timezones.sh` جدول‌های Timezone را یک‌بار بارگذاری می‌کند؛ بدون آن `date_hierarchy` ادمین با خطا مواجه می‌شود.
+
+### بکاپ مستقل از وب
+
+`docker/backup/Dockerfile` از image رسمی MariaDB با digest ثابت، فقط client و worker استاندارد Python را اجرا می‌کند. `db-backup` به `db` healthy وابسته است؛ server یا database تازه نمی‌سازد. restart policy، بدون ports/socket/capabilities، rootfs خواندنی و `/tmp` محدود دارد. bind mount پیش‌فرض `/root/minikandoo-backups` فایل‌ها را از recreate کانتینر حفظ می‌کند.
+
+initial backup و مرزهای ۰۰/۳۰ دقیقهٔ UTC با loop داخلی اجرا می‌شوند؛ failure به tick بعد می‌رود. flock مشترک تمام manual/scheduled/retention عملیات را سریالی می‌کند. engineهای schema قبل از dump خوانده می‌شوند؛ non-InnoDB با سیاست پیش‌فرض رد می‌شود. gzip، SHA256 sidecar و publication بدون overwrite لازم‌اند. recent 48 + daily 7 با overlap، حفاظت newest/previous و تمام legacy/unrelated فایل‌ها اجرا می‌شود؛ dry-run قبل از فعال‌سازی حذف لازم است. ظرفیت از اندازه‌گیری واقعی و limits قابل تنظیم بررسی می‌شود. [راهنمای عملیات و restore](docs/production-database-backups.md) جزئیات و محدودیت same-host را دارد.
 
 ---
 

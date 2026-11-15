@@ -43,6 +43,7 @@ services:
       COLLECTSTATIC_ON_START: "1"
       SEED_ON_START: "0"
       WAIT_TIMEOUT: "180"
+      ZIBAL_PAID_AT_TIMEZONE: ${ZIBAL_PAID_AT_TIMEZONE:-}
     volumes:
       - staticfiles:/app/staticfiles
     depends_on:
@@ -56,6 +57,57 @@ services:
   db:
     environment:
       MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set an independent database root password}
+    logging: *logs
+
+  db-backup:
+    build:
+      context: .
+      dockerfile: docker/backup/Dockerfile
+    restart: unless-stopped
+    # Existing private host backups are owned by root. No recursive chown or
+    # changes to their permissions are performed; all capabilities are dropped.
+    user: "${BACKUP_UID:-0}:${BACKUP_GID:-0}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+      # Mask the official image's inherited data VOLUME. The worker uses TCP
+      # clients only; no anonymous database-data volume is needed or created.
+      - /var/lib/mysql:ro,noexec,nosuid,nodev
+    environment:
+      DATABASE_HOST: db
+      DATABASE_PORT: "3306"
+      DATABASE_NAME: ${DATABASE_NAME:-clothing_shop}
+      # Reuse the existing dump account. Root can export routines/events and
+      # acquire consistency locks; no new accounts or production grants are made.
+      DATABASE_USER: root
+      DATABASE_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set an independent database root password}
+      BACKUP_DIRECTORY: /backups
+      BACKUP_RETENTION_RECENT: ${BACKUP_RETENTION_RECENT:-48}
+      BACKUP_RETENTION_DAILY_DAYS: ${BACKUP_RETENTION_DAILY_DAYS:-7}
+      # Review the initial dry-run before opting into managed-file deletions.
+      BACKUP_RETENTION_MODE: ${BACKUP_RETENTION_MODE:-dry-run}
+      BACKUP_MAX_TOTAL_BYTES: ${BACKUP_MAX_TOTAL_BYTES:-}
+      BACKUP_MIN_FREE_BYTES: ${BACKUP_MIN_FREE_BYTES:-}
+      BACKUP_NON_TRANSACTIONAL_POLICY: ${BACKUP_NON_TRANSACTIONAL_POLICY:-refuse}
+      BACKUP_COMMAND_TIMEOUT_SECONDS: ${BACKUP_COMMAND_TIMEOUT_SECONDS:-1200}
+    volumes:
+      - type: bind
+        source: ${BACKUP_HOST_DIR:-/root/minikandoo-backups}
+        target: /backups
+        bind:
+          create_host_path: false
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [shop-net]
+    healthcheck:
+      test: [CMD, python3, /opt/minikandoo/db_backup.py, healthcheck]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
     logging: *logs
 
   redis:

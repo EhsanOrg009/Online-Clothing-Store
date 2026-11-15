@@ -50,6 +50,8 @@ class OrderQuerySet(models.QuerySet):
         now = now or timezone.now()
         return self.filter(
             status__in=[OrderStatus.PENDING_PAYMENT, OrderStatus.PAYMENT_FAILED],
+            payment_status__in=[PaymentStatus.PENDING, PaymentStatus.FAILED, PaymentStatus.CANCELLED],
+            inventory_released=False,
             expires_at__isnull=False,
             expires_at__lt=now,
         )
@@ -113,6 +115,10 @@ class Order(TimeStampedModel):
         _("مهلت پرداخت"), null=True, blank=True, db_index=True,
         help_text=_("پس از این زمان سفارش لغو و موجودی آزاد می‌شود."),
     )
+    inventory_released = models.BooleanField(
+        _("موجودی رزروشده آزاد شده"), default=False, editable=False,
+        help_text=_("آزادسازی فقط تحت قفل سفارش انجام می‌شود؛ پرداخت این سفارش را احیا نمی‌کند."),
+    )
     paid_at = models.DateTimeField(_("زمان پرداخت"), null=True, blank=True)
     shipped_at = models.DateTimeField(_("زمان ارسال"), null=True, blank=True)
     delivered_at = models.DateTimeField(_("زمان تحویل"), null=True, blank=True)
@@ -153,7 +159,7 @@ class Order(TimeStampedModel):
         return self.status in (
             OrderStatus.PENDING_PAYMENT,
             OrderStatus.PAYMENT_FAILED,
-        ) and not self.is_expired
+        ) and not self.is_paid and not self.inventory_released and not self.is_expired
 
     @property
     def status_label(self) -> str:

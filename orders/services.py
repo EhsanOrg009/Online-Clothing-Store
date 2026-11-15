@@ -47,6 +47,10 @@ class OrderNotPayable(OrderError):
     """
 
 
+class OrderInventoryUnavailable(OrderError):
+    """An active order no longer has an intact reservation; require manual review."""
+
+
 @transaction.atomic
 def create_order(
     *,
@@ -75,7 +79,7 @@ def create_order(
     cart_items = list(
         cart.items.select_for_update()
         .select_related("variant", "variant__product", "variant__color", "variant__size")
-        .order_by("id")
+        .order_by("variant_id", "id")
     )
     if not cart_items:
         raise OrderError(_("سبد خرید شما خالی است."))
@@ -205,8 +209,13 @@ def _refresh_instance(target: Order, source: Order) -> None:
 
 
 @transaction.atomic
-def mark_order_paid(order: Order, paid_at=None) -> Order:
-    """ثبت پرداخت موفق سفارش (Idempotent؛ فراخوانی مجدد اثری ندارد)."""
+def mark_order_paid(order: Order, paid_at=None, *, gateway_paid_at=None) -> Order:
+    """Record local acceptance; eligibility uses the independently known gateway time.
+
+    paid_at retains its local recording semantics. A delayed callback may pay an
+    active order, but it can never restore inventory that cancellation released.
+    Lock order: Order, then ProductVariant in ascending primary-key order.
+    """
     original = order
     order = Order.objects.select_for_update().get(pk=order.pk)
     if order.payment_status == PaymentStatus.SUCCESSFUL:
@@ -216,10 +225,28 @@ def mark_order_paid(order: Order, paid_at=None) -> Order:
     # دفاع نهایی: سفارش لغو/منقضی‌شده نباید «پرداخت‌شده» شود. اگر پول در درگاه
     # گرفته شده، فراخواننده (process_callback) این استثنا را گرفته و تراکنش را
     # برای بازگشت وجه علامت می‌زند؛ وضعیت سفارش دست‌نخورده می‌ماند.
-    if order.status == OrderStatus.CANCELLED or order.is_expired:
+    effective_time = gateway_paid_at or timezone.now()
+    if timezone.is_naive(effective_time) or effective_time > timezone.now():
+        raise OrderNotPayable(_("زمان قطعی پرداخت قابل مقایسه نیست."))
+    if (
+        order.status not in (OrderStatus.PENDING_PAYMENT, OrderStatus.PAYMENT_FAILED)
+        or order.inventory_released
+        or (order.expires_at and effective_time > order.expires_at)
+    ):
         raise OrderNotPayable(
             _("سفارش لغو یا منقضی‌شده قابل علامت‌گذاری به‌عنوان پرداخت‌شده نیست.")
         )
+
+    items = list(order.items.order_by("variant_id", "pk"))
+    variant_ids = {item.variant_id for item in items if item.variant_id}
+    variants = list(
+        ProductVariant.objects.select_for_update().filter(pk__in=variant_ids).order_by("pk")
+    )
+    if (
+        not items or any(not item.variant_id or item.quantity <= 0 for item in items)
+        or len(variants) != len(variant_ids)
+    ):
+        raise OrderInventoryUnavailable(_("رزرو موجودی سفارش نیازمند بررسی دستی است."))
 
     order.payment_status = PaymentStatus.SUCCESSFUL
     if order.status in (OrderStatus.PENDING_PAYMENT, OrderStatus.PAYMENT_FAILED):
@@ -242,9 +269,18 @@ def mark_order_paid(order: Order, paid_at=None) -> Order:
 
 def _restore_stock(order: Order) -> None:
     """آزادسازی موجودی رزروشده یک سفارش (فقط یک بار اجرا می‌شود)."""
-    for item in order.items.select_related("variant"):
+    if order.inventory_released:
+        return
+    items = list(order.items.order_by("variant_id", "pk"))
+    variants = {
+        variant.pk: variant for variant in ProductVariant.objects.select_for_update()
+        .filter(pk__in={item.variant_id for item in items if item.variant_id}).order_by("pk")
+    }
+    for item in items:
         if item.variant_id and item.quantity:
-            item.variant.restore_stock(item.quantity)
+            if variant := variants.get(item.variant_id):
+                variant.restore_stock(item.quantity)
+    order.inventory_released = True
 
 
 def _apply_cancellation(order: Order, *, mark_payment_cancelled: bool) -> None:
@@ -276,7 +312,9 @@ def cancel_order(order: Order, *, mark_payment_cancelled: bool = False) -> Order
         return original  # Idempotent
 
     _apply_cancellation(order, mark_payment_cancelled=mark_payment_cancelled)
-    order.save(update_fields=["status", "payment_status", "expires_at", "updated_at"])
+    order.save(update_fields=[
+        "status", "payment_status", "expires_at", "inventory_released", "updated_at",
+    ])
     logger.info("سفارش %s لغو شد", order.order_number)
     _refresh_instance(original, order)
     return original
@@ -295,7 +333,10 @@ def expire_due_orders() -> int:
         try:
             with transaction.atomic():
                 order = Order.objects.select_for_update().get(pk=order.pk)
-                if order.status not in (OrderStatus.PENDING_PAYMENT, OrderStatus.PAYMENT_FAILED) or not order.is_expired:
+                if (
+                    order.status not in (OrderStatus.PENDING_PAYMENT, OrderStatus.PAYMENT_FAILED)
+                    or order.is_paid or order.inventory_released or not order.is_expired
+                ):
                     continue
                 _restore_stock(order)
                 order.status = OrderStatus.CANCELLED
@@ -304,6 +345,7 @@ def expire_due_orders() -> int:
                     update_fields=[
                         "status",
                         "payment_status",
+                        "inventory_released",
                         "updated_at",
                     ]
                 )
@@ -332,6 +374,8 @@ def transition_status(order: Order, new_status: str) -> Order:
             _("تغییر وضعیت از «%(current)s» به «%(new)s» مجاز نیست.")
             % {"current": order.status_label, "new": OrderStatus.customer_label(new_status)}
         )
+    if new_status == OrderStatus.PAID and not order.is_paid:
+        raise OrderError(_("پرداخت فقط از طریق تأیید درگاه ثبت می‌شود."))
     if new_status == OrderStatus.CANCELLED:
         _apply_cancellation(order, mark_payment_cancelled=True)
     else:

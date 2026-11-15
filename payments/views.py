@@ -98,14 +98,14 @@ def payment_callback(request):
         messages.error(request, exc.message)
         return redirect("orders:detail", order_number=payment.order.order_number)
 
-    if payment.needs_refund:
+    if payment.needs_refund or payment.requires_manual_review:
         messages.warning(request, payment.error_message)
     return _result_redirect(payment)
 
 
 def _result_redirect(payment: Payment):
     order_number = payment.order.order_number
-    if payment.needs_refund or payment.is_pending:
+    if payment.needs_refund or payment.is_pending or payment.requires_manual_review:
         return redirect("orders:detail", order_number=order_number)
     if payment.status == PaymentStatus.SUCCESSFUL:
         return redirect("payments:result_success", order_number=order_number)

@@ -1,38 +1,13 @@
-#!/usr/bin/env bash
-# A new, private MariaDB dump; never overwrite an existing incident backup.
-set -euo pipefail
-set -o noclobber
+#!/bin/sh
+# The manual operation uses exactly the scheduler's image, mount and lock.
+# Configure BACKUP_HOST_DIR in the private production env; no second destination
+# is accepted because it would bypass the shared directory lock and retention.
+set -eu
 umask 077
-
-zibal_project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-cd "$zibal_project_root"
-if [ "$#" -gt 1 ]; then
-    printf 'Usage: scripts/backup-production-db [backup-directory]\n' >&2
+backup_project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$backup_project_root"
+if [ "$#" -ne 0 ]; then
+    printf 'Usage: scripts/backup-production-db (set BACKUP_HOST_DIR in the production environment)\n' >&2
     exit 2
 fi
-zibal_backup_dir=${1:-/root/minikandoo-backups}
-mkdir -p -m 700 -- "$zibal_backup_dir"
-zibal_backup_partial=$(mktemp "$zibal_backup_dir/db-$(date -u +%Y%m%d-%H%M%S)-XXXXXX.sql.gz.partial")
-
-# Password is inherited inside the database container, never placed in command
-# arguments or emitted to the terminal. pipefail rejects incomplete dumps.
-if ! scripts/compose-production exec -T db sh -eu -c '
-    MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb-dump --user=root \
-        --single-transaction --quick --routines --events --triggers "$MARIADB_DATABASE"
-' | gzip -n -c >| "$zibal_backup_partial"; then
-    printf 'Database dump failed. Recovery must stop. Partial file: %s\n' "$zibal_backup_partial" >&2
-    exit 1
-fi
-if ! gzip -t -- "$zibal_backup_partial"; then
-    printf 'Backup compression check failed. Recovery must stop. Partial file: %s\n' "$zibal_backup_partial" >&2
-    exit 1
-fi
-zibal_backup_path=${zibal_backup_partial%.partial}
-mv --no-clobber -- "$zibal_backup_partial" "$zibal_backup_path"
-if [ -e "$zibal_backup_partial" ]; then
-    printf 'Backup destination already exists; both files were preserved.\n' >&2
-    exit 1
-fi
-sha256sum -- "$zibal_backup_path" > "$zibal_backup_path.sha256"
-printf 'Backup: %s\n' "$zibal_backup_path"
-printf 'Gzip integrity verified. SHA256 sidecar: %s.sha256\n' "$zibal_backup_path"
+exec scripts/compose-production run --rm --no-deps -T db-backup backup

@@ -18,6 +18,7 @@ class PaymentAdmin(admin.ModelAdmin):
         "callback_count",
         "created_at",
         "verified_at",
+        "gateway_paid_at",
     )
     list_filter = ("status", "needs_refund", "gateway", "created_at")
     search_fields = (
@@ -42,6 +43,7 @@ class PaymentAdmin(admin.ModelAdmin):
         "created_at",
         "verified_at",
         "paid_at",
+        "gateway_paid_at",
     )
     date_hierarchy = "created_at"
     list_per_page = 25

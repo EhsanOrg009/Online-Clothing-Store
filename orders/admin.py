@@ -91,6 +91,7 @@ class OrderAdmin(admin.ModelAdmin):
         "delivered_at",
         "created_at",
         "updated_at",
+        "inventory_released",
     )
     inlines = [OrderItemInline]
     date_hierarchy = "created_at"
@@ -134,6 +135,7 @@ class OrderAdmin(admin.ModelAdmin):
             {
                 "fields": (
                     "expires_at",
+                    "inventory_released",
                     "paid_at",
                     "shipped_at",
                     "delivered_at",
