@@ -8,6 +8,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/db_backup.py /opt/minikandoo/db_backup.py
+COPY scripts/db_backup_provision.py /opt/minikandoo/db_backup_provision.py
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 TZ=UTC
 
 # Replaces the database image entrypoint: no database server is ever started.

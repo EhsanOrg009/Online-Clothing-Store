@@ -21,6 +21,8 @@ image رسمی یک `VOLUME /var/lib/mysql` موروثی دارد. Compose ای�
 
 ```env
 BACKUP_HOST_DIR=/root/minikandoo-backups
+BACKUP_DB_USER=minikandoo_backup
+BACKUP_DB_PASSWORD=REPLACE_WITH_A_STRONG_UNIQUE_BACKUP_PASSWORD
 BACKUP_UID=0
 BACKUP_GID=0
 BACKUP_RETENTION_RECENT=48
@@ -64,14 +66,55 @@ Python scheduler داخل کانتینر:
 پیش از هر dump، `information_schema.TABLES` engine، تعداد جدول و bytes واقعی schema را می‌خواند. برای تمام جدول‌های InnoDB:
 
 ```text
-mariadb-dump --single-transaction --quick --routines --events --triggers --hex-blob
+mariadb-dump --single-transaction --quick --routines --events --triggers --hex-blob --no-tablespaces
 ```
 
 برای هر engine دیگر، سیاست پیش‌فرض **refuse** است؛ dump ناسازگار completed نمی‌شود. تنها پس از بررسی مسئول دیتابیس، `BACKUP_NON_TRANSACTIONAL_POLICY=lock-all` اجازهٔ `--lock-all-tables` می‌دهد. این حالت می‌تواند نویسنده‌های DB را مسدود کند و باید با اندازه و رفتار واقعی schema بررسی شود. به‌صورت خودکار engine تبدیل یا grant جدید اعمال نمی‌شود.
 
-سرویس از root password موجود MariaDB استفاده می‌کند تا routine/event و در صورت نیاز consistency lock قابل خواندن باشند. فقط نام/host/port و credential دیتابیس را می‌گیرد؛ merchant و secret برنامه به آن نمی‌رسند. password در option file موقت `0600` داخل `/tmp` قرار دارد؛ در argv clientها یا logs نیست. محیط childها فقط PATH/locale/UTC دارد. `mariadb-dump` گزینهٔ `--connect-timeout` SQL client را پشتیبانی نمی‌کند؛ deadline کلی worker اتصال، dump و compression را محدود می‌کند.
+سرویس طولانی‌عمر فقط `BACKUP_DB_USER` و `BACKUP_DB_PASSWORD` حساب جداگانه را می‌گیرد؛ root password یا credential حساب برنامه وارد آن نمی‌شود. هیچ fallback به root وجود ندارد. UID صفر کانتینر برای فایل‌های root-owned است و با حساب root دیتابیس متفاوت است. merchant و secret برنامه نیز به آن نمی‌رسند. password در option file موقت `0600` داخل `/tmp` قرار دارد؛ در argv clientها یا logs نیست. محیط childها فقط PATH/locale/UTC دارد. `mariadb-dump` گزینهٔ `--connect-timeout` SQL client را پشتیبانی نمی‌کند؛ deadline کلی worker اتصال، dump و compression را محدود می‌کند.
 
 `--single-transaction` حفاظت از DDL همزمان نمی‌دهد. migration، ALTER/DROP و تغییر engine را هنگام dump اجرا نکنید. در maintenance window، scheduler را با اجازهٔ استقرار کنترل و قبل از migration بکاپ دستی معتبر تهیه کنید. اندازه و engineهای production در این محیط بررسی نشده‌اند؛ نتیجهٔ schema مصنوعی QA جایگزین آن نیست.
+
+## حساب محدود و provisioning صریح
+
+در فایل محیط خصوصی موجود، `BACKUP_DB_USER` و رمز قوی و مستقل `BACKUP_DB_PASSWORD` را تنظیم کنید؛ فایل نمونه جایگزین تنظیمات سرور نیست. username این ابزار ۱ تا ۳۲ کاراکتر ASCII با شروع حرف و ادامهٔ حرف/رقم/underscore است؛ root، حساب برنامه و نام‌های نامعتبر رد می‌شوند. `db-backup-provision` در profile `backup-admin` کوتاه‌عمر، بدون port یا mount بکاپ است و فقط این عملیات صریح را با credential root انجام می‌دهد:
+
+```sh
+scripts/compose-production --profile backup-admin build db-backup db-backup-provision
+scripts/compose-production --profile backup-admin run --rm -T db-backup-provision
+```
+
+این فرمان برای production فقط پس از بازبینی و اجازهٔ مسئول استقرار اجرا شود؛ در این اصلاحات grants واقعی VPS اعمال نشده‌اند. health dependency منتظر DB سالم می‌ماند. account در صورت نبودن ساخته و فقط grants همان حساب جداگانه به مجموعهٔ زیر تنظیم می‌شود؛ اجرای مجدد password موجود را تغییر نمی‌دهد. حساب دارای role یا identity میزبان دیگر برای بررسی انسانی رد می‌شود. SQL با `NO_BACKSLASH_ESCAPES` و quote escaping ساخته و از stdin خصوصی ارسال می‌شود؛ password یا SQL شامل آن در argv/log نیست. MariaDB نام schema در GRANT را حتی داخل backtick به‌صورت pattern تفسیر می‌کند؛ `_`، `%` و backslash جداگانه escape می‌شوند تا grant فقط همان نام واقعی schema را پوشش دهد. آزمون MariaDB دسترسی به دیتابیس مشابهی که در محل underscore حرف دیگری دارد را رد می‌کند.
+
+| محدوده | مجوز | علت |
+| --- | --- | --- |
+| schema فروشگاه | `SELECT` | دادهٔ جدول‌ها و اطلاعات engine/اندازه |
+| schema فروشگاه | `SHOW VIEW` | تعریف view |
+| schema فروشگاه | `TRIGGER` | خروجی triggerها |
+| schema فروشگاه | `EVENT` | خروجی eventها |
+| فقط `mysql.proc` | `SELECT` | شرط رسمی `mariadb-dump --routines` و خواندن تعریف routineهای متعلق به حساب دیگر |
+| سراسری، فقط با مجوز صریح | `RELOAD` | `--lock-all-tables` از `FLUSH TABLES WITH READ LOCK` استفاده می‌کند |
+
+منابع رسمی: [mariadb-dump](https://mariadb.com/docs/server/clients-and-utilities/backup-restore-and-import-clients/mariadb-dump)، [GRANT](https://mariadb.com/docs/server/reference/sql-statements/account-management-sql-statements/grant) و [client نسخهٔ 11.4.13](https://github.com/MariaDB/server/blob/mariadb-11.4.13/client/mysqldump.cc). image backup به همین نسخه pin است؛ نسخهٔ DB واقعی VPS باید جداگانه بررسی شود. `--single-transaction` نیاز به LOCK TABLES/RELOAD ندارد؛ `--no-tablespaces` از نیاز غیرضروری به metadata tablespace جلوگیری می‌کند. `SELECT mysql.proc` می‌تواند تعریف routineهای دیگر schemaها را نیز قابل خواندن کند؛ این محدودیت API رسمی این client است و به global SELECT یا ALL PRIVILEGES تبدیل نشده است. EVENT/TRIGGER مجوزهای صرفاً نمایش نیستند؛ MariaDB برای export آن‌ها همین مجوزها را لازم دارد. حساب بکاپ به DML، CREATE USER، DROP DATABASE، SUPER یا GRANT OPTION دسترسی ندارد.
+
+برای non-InnoDB تنها پس از بررسی اثر قفل سراسری:
+
+```sh
+scripts/compose-production --profile backup-admin run --rm -T db-backup-provision --allow-lock-all
+# سیاست worker نیز باید صریحاً BACKUP_NON_TRANSACTIONAL_POLICY=lock-all باشد.
+```
+
+اجرای provisioning بدون این flag، RELOAD اختیاری را از حساب بکاپ برمی‌دارد. برای rotation، ابتدا رمز جدید را فقط در محیط خصوصی تنظیم کنید، سپس:
+
+```sh
+scripts/compose-production --profile backup-admin run --rm -T db-backup-provision --rotate-password
+# پس از اجازهٔ maintenance، کانتینر worker باید با محیط جدید recreate شود.
+scripts/compose-production up -d --no-deps db-backup
+```
+
+هر دو flag در صورت نیاز می‌توانند با هم استفاده شوند. password در گزینهٔ `--env KEY=value` یا argv قرار نگیرد. provisioning خود scheduler را شروع یا recreate نمی‌کند. در failure، DB health، اتصال داخلی، credential admin، username جداگانه و role/hostهای موجود را خصوصی بررسی کنید؛ fallback به root برای worker یا grant ALL راه‌حل نیست. پس از رفع علت همان فرمان idempotent دوباره اجرا شود.
+
+برای بررسی حساب و کفایت dump، `db-backup inspect` و بکاپ دستی معتبر اجرا کنید. هیچ SHOW GRANTS خام شامل authentication hash را در گزارش عمومی چاپ نکنید. driver QA بررسی می‌کند حساب authenticate می‌شود، dump شامل view/routine/trigger/event است، عملیات مدیریتی و DML اضافی رد می‌شوند و rotation اختیاری کار می‌کند.
 
 ## نام‌گذاری و انتشار فایل معتبر
 
@@ -131,7 +174,13 @@ scripts/compose-production logs --tail=100 db-backup
 
 در حالت خالی، تخمین attempt از بیشینهٔ دو برابر bytes واقعی جدول‌ها و اندازهٔ SQL بازشدهٔ بکاپ‌های قبلی گرفته می‌شود؛ expansion دادهٔ binary و overhead باید جداگانه بررسی شود. reserve آزاد پیش‌فرض برابر همان تخمین است. این یک estimate عملیاتی است و تضمین حداکثر اندازهٔ SQL نیست. free space و سقف پوشه قبل، حین و بلافاصله پس از dump بررسی می‌شوند؛ failure ظرفیت completed منتشر نمی‌کند.
 
-مصرف فایل‌های historical، unrelated و partial در سقف حساب می‌شود، اما برای بازکردن فضا خودکار حذف نمی‌شوند. اگر limit پیش از dump مانع attempt شد، بکاپ‌های خوب برای عبور از سقف قربانی نمی‌شوند؛ مسئول باید dry-run retention را بررسی و limit/فضا را اصلاح کند. headroom ناکافی می‌تواند مانع ساخت بکاپ بعدی شود. در حالت apply، retention پس از success مانع رشد نامحدود فایل‌های managed می‌شود؛ دادهٔ historical/invalid نیاز به بررسی انسانی دارد.
+مصرف فایل‌های historical، unrelated و partial در سقف حساب می‌شود و خودکار حذف نمی‌شوند. پس از engine inquiry و اعتبارسنجی recovery pointها، اگر ظرفیت کافی باشد cleanup پیش از dump انجام نمی‌شود. اگر سقف کل یا reserve آزاد کافی نباشد، زیر همان exclusive lock برنامهٔ عادی retention با دلیل `capacity_pressure` تولید می‌شود. در dry-run، کل plan و bytes قابل آزادسازی گزارش و attempt بدون حذف متوقف می‌شود. در apply فقط pairهای از قبل eligible حذف، recovery pointها دوباره validate و مصرف/فضای آزاد و ظرفیت دوباره محاسبه می‌شوند. تنها پس از عبور check دوم dump شروع می‌شود.
+
+recent 48، daily هفت روز، newest و previous معتبر برای ساخت بکاپ تازه قربانی نمی‌شوند. اگر recovery set محافظت‌شده کنار dump تخمینی و reserve جا نشود، attempt با خطای روشن متوقف می‌شود. اگر dump پس از cleanup ظرفیت شکست بخورد، pairهای محافظت‌شده همچنان باقی می‌مانند. retention عادی پس از success نیز حفظ شده است؛ تعداد retention خودکار پایین آورده نمی‌شود. historical/invalid نیاز به بررسی انسانی دارند.
+
+## اسکن یک‌گذر integrity
+
+`scan_recovery_points()` برای هر pair یک جریان sequential باز می‌کند: SHA256 روی bytes اصلی compressed محاسبه و همان stream با gzip تا EOF باز می‌شود؛ CRC، تمام memberها، truncation و SQL غیرخالی بررسی می‌شوند. digest با sidecar موجود تطبیق دارد. file descriptor با `O_NOFOLLOW` باز و inode/device/size/mtime/ctime فایل و sidecar پیش و پس از خواندن کنترل می‌شوند. هیچ cache مبتنی بر نام/اندازه/mtime جایگزین validation نیست. پیش از حذف نیز pair دوباره کامل بررسی می‌شود. آزمون شمارش bytes، یک بار خواندن compressed bytes را برای فایل چندمگابایتی ثابت می‌کند.
 
 ## قفل و اجرای دستی
 
@@ -180,8 +229,7 @@ sys.path.insert(0, "/opt/minikandoo")
 import db_backup as b
 p = Path("/backups") / sys.argv[1]
 with b.protect_recovery_backup(p):
-    digest = b.verify_backup_checksum(p)
-    size = b.verify_gzip(p)
+    digest, size = b.verify_backup_integrity(p)
     print({"filename": p.name, "sha256_verified": True, "uncompressed_bytes": size})
 ' "$BACKUP_NAME"
 ```
@@ -218,8 +266,8 @@ from pathlib import Path
 import secrets, sys
 password = secrets.token_urlsafe(32)
 Path(sys.argv[1]).write_text(
-    "MARIADB_ROOT_PASSWORD=" + password + "\nDATABASE_PASSWORD=" + password
-    + "\nDATABASE_USER=root\nDATABASE_HOST=" + sys.argv[2]
+    "MARIADB_ROOT_PASSWORD=" + password
+    + "\nDATABASE_HOST=" + sys.argv[2]
     + "\nDATABASE_NAME=" + sys.argv[3] + "\nDATABASE_PORT=3306\nBACKUP_DIRECTORY=/backups\n"
 )
 PY
@@ -243,12 +291,17 @@ docker run --rm -i --network "$restore_network" --env-file "$restore_env" \
   --tmpfs /var/lib/mysql:ro,nosuid,nodev,noexec \
   --cap-drop ALL --security-opt no-new-privileges \
   --entrypoint python3 "$backup_image" - "$BACKUP_NAME" <<'PY'
-import gzip, shutil, subprocess, sys
+import gzip, os, shutil, subprocess, sys
+from pathlib import Path
 sys.path.insert(0, "/opt/minikandoo")
 import db_backup as b
-c = b.Config.from_env()
+# This root credential belongs only to the isolated restore target, never the worker.
+c = b.Config(directory=Path("/backups"), database=os.environ["DATABASE_NAME"],
+             host=os.environ["DATABASE_HOST"], port=int(os.environ.get("DATABASE_PORT", "3306")))
 p = c.directory / sys.argv[1]
-with b.protect_recovery_backup(p), b.client_options(c) as options:
+with b.protect_recovery_backup(p), b.mariadb_client_options(
+    c.database, "root", os.environ["MARIADB_ROOT_PASSWORD"], c.host, c.port,
+) as options:
     b.verify_backup_checksum(p)
     b.verify_gzip(p)
     create = subprocess.run(

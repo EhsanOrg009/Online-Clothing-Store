@@ -411,7 +411,7 @@ class BackupWorkerTests(SimpleTestCase):
         self.assertTrue(all((self.directory / name).read_bytes() == value for name, value in before.items()))
 
     def test_safe_default_retention_is_preview_until_reviewed(self):
-        config = backup.Config.from_env({"BACKUP_DIRECTORY": str(self.directory)})
+        config = backup.Config.from_env({"BACKUP_DIRECTORY": str(self.directory), "BACKUP_DB_USER": "test_client", "BACKUP_DB_PASSWORD": self.config.password})
         self.assertEqual(config.retention_mode, "dry-run")
         self.assertEqual(config.recent, 48)
         self.assertEqual(config.daily_days, 7)
@@ -424,7 +424,7 @@ class BackupWorkerTests(SimpleTestCase):
                            ("BACKUP_RETENTION_MODE", "automatic"), ("DATABASE_PORT", "65536")):
             with self.subTest(key=key):
                 with self.assertRaises(backup.BackupError):
-                    backup.Config.from_env({key: value})
+                    backup.Config.from_env({"BACKUP_DB_USER": "test_client", "BACKUP_DB_PASSWORD": self.config.password, key: value})
 
     def test_insufficient_disk_space_fails_without_deleting_points(self):
         prior = self.point(self.now - timedelta(hours=1))
@@ -504,7 +504,7 @@ class BackupWorkerTests(SimpleTestCase):
     def test_manual_worker_cli_uses_same_implementation(self):
         env = {
             **os.environ, "BACKUP_DIRECTORY": str(self.directory), "DATABASE_NAME": "synthetic_test",
-            "DATABASE_USER": "test_client", "DATABASE_PASSWORD": self.config.password,
+            "BACKUP_DB_USER": "test_client", "BACKUP_DB_PASSWORD": self.config.password,
             "BACKUP_RETENTION_MODE": "apply", "BACKUP_MIN_FREE_BYTES": "0",
         }
         result = subprocess.run([sys.executable, str(ROOT / "scripts/db_backup.py"), "backup"],
@@ -523,6 +523,181 @@ class BackupWorkerTests(SimpleTestCase):
         with self.assertRaisesMessage(backup.BackupError, "interrupted"):
             self.perform(stop_event=stopped)
         self.assertEqual(list(self.directory.glob("*.sql.gz")), [])
+
+    def capacity_fixture(self):
+        for index in range(48):
+            self.point(self.now - timedelta(minutes=30 * index))
+        for day in range(2, 8):
+            self.point((self.now - timedelta(days=day)).replace(hour=23, minute=30))
+        old = self.point(self.now - timedelta(days=15), contents=os.urandom(16000))
+        corrupt = self.point(self.now - timedelta(days=16), checksum=False)
+        historical = self.directory / "db-20261114-190647.sql.gz"
+        historical.write_bytes(b"historical synthetic fixture")
+        plan = backup.make_retention_plan(self.config, now=self.now)
+        protected = [self.directory / name for name in plan["retained"]]
+        used = backup.storage_bytes(self.directory)
+        old_pair_bytes = old.stat().st_size + Path(str(old) + ".sha256").stat().st_size
+        self.config = replace(self.config, min_free_bytes=0, max_total_bytes=used - old_pair_bytes + 2100)
+        return old, protected, corrupt, historical
+
+    def test_sufficient_capacity_does_not_clean_retention_before_dump(self):
+        self.config = replace(self.config, recent=2, daily_days=0)
+        old = self.point(self.now - timedelta(days=15))
+        self.point(self.now - timedelta(hours=1))
+        self.point(self.now - timedelta(hours=2))
+        original = backup._dump_to_gzip
+        def dump(*args):
+            self.assertTrue(old.exists())
+            self.assertNotIn('"reason": "capacity_pressure"', self.output.getvalue())
+            return original(*args)
+        with patch.object(backup, "_dump_to_gzip", side_effect=dump):
+            self.perform()
+        self.assertFalse(old.exists())  # Ordinary post-success retention remains active.
+
+    def test_capacity_cleanup_rechecks_limits_and_preserves_full_retention_set(self):
+        old, protected, corrupt, historical = self.capacity_fixture()
+        original = backup._dump_to_gzip
+        def dump(*args):
+            self.assertFalse(old.exists())
+            self.assertFalse(Path(str(old) + ".sha256").exists())
+            self.assertTrue(all(path.exists() for path in protected))
+            return original(*args)
+        with patch.object(backup, "capacity_check", wraps=backup.capacity_check) as capacity, patch.object(
+            backup, "_dump_to_gzip", side_effect=dump,
+        ):
+            result = self.perform()
+        self.assertEqual(capacity.call_count, 2)
+        self.assertTrue(result.path.exists())
+        self.assertTrue(corrupt.exists())
+        self.assertTrue(historical.exists())
+        # New success may rotate the old recent boundary; daily and latest two stay protected.
+        points, invalid = backup.scan_recovery_points(self.directory)
+        self.assertGreaterEqual(len(points), 48)
+        self.assertIn(corrupt.name, invalid)
+        daily = {p.timestamp.date() for p in points}
+        self.assertTrue(all((self.now - timedelta(days=day)).date() in daily for day in range(1, 8)))
+
+    def test_capacity_dry_run_logs_reclaimed_bytes_without_deletion(self):
+        old, protected, corrupt, historical = self.capacity_fixture()
+        self.config = replace(self.config, retention_mode="dry-run")
+        with patch.object(backup, "_dump_to_gzip") as dump:
+            with self.assertRaises(backup.BackupCapacityError):
+                self.perform()
+        dump.assert_not_called()
+        self.assertTrue(all(path.exists() for path in [old, *protected, corrupt, historical]))
+        events = [json.loads(line) for line in self.output.getvalue().splitlines()]
+        plan = next(e for e in events if e["event"] == "retention_plan")
+        self.assertEqual(plan["mode"], "dry-run")
+        self.assertGreater(plan["estimated_bytes_freed"], 0)
+
+    def test_capacity_failure_after_cleanup_never_sacrifices_protected_points(self):
+        old, protected, corrupt, historical = self.capacity_fixture()
+        self.config = replace(self.config, max_total_bytes=100)
+        with patch.object(backup, "_dump_to_gzip") as dump:
+            with self.assertRaisesMessage(backup.BackupCapacityError, "remains insufficient"):
+                self.perform()
+        dump.assert_not_called()
+        self.assertFalse(old.exists())
+        self.assertTrue(all(path.exists() for path in [*protected, corrupt, historical]))
+        for path in protected:
+            backup.verify_backup_integrity(path)
+
+    def test_failed_dump_after_capacity_cleanup_preserves_every_protected_pair(self):
+        old, protected, corrupt, historical = self.capacity_fixture()
+        self.stub_client("mariadb-dump", "exit 2\n")
+        with self.assertRaises(backup.BackupError):
+            self.perform()
+        self.assertFalse(old.exists())
+        self.assertTrue(all(path.exists() for path in [*protected, corrupt, historical]))
+        for path in protected:
+            backup.verify_backup_integrity(path)
+        self.assertNotIn('"event": "backup_completed"', self.output.getvalue())
+
+    def test_capacity_cleanup_can_recover_required_free_space(self):
+        old, protected, _, _ = self.capacity_fixture()
+        self.config = replace(self.config, max_total_bytes=None, min_free_bytes=1000)
+        def disk_usage(directory):
+            return shutil._ntuple_diskusage(100000, 99500, 500) if old.exists() else shutil._ntuple_diskusage(100000, 50000, 50000)
+        with patch.object(backup.shutil, "disk_usage", side_effect=disk_usage):
+            self.assertTrue(self.perform().path.exists())
+        self.assertFalse(old.exists())
+
+    def test_combined_integrity_scan_reads_original_compressed_bytes_once(self):
+        contents = os.urandom(2 * 1024 * 1024)
+        path = self.point(contents=contents)
+        count = 0
+        original = backup._HashingReader.read
+        def read(reader, size=-1):
+            nonlocal count
+            data = original(reader, size)
+            count += len(data)
+            return data
+        with patch.object(backup._HashingReader, "read", new=read):
+            digest, size = backup.verify_backup_integrity(path)
+        self.assertEqual(size, len(contents))
+        self.assertEqual(count, path.stat().st_size)
+        self.assertEqual(digest, hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_combined_integrity_rejects_corruption_truncation_and_bad_sidecars(self):
+        for failure in ("corrupt", "truncate", "missing", "mismatch", "malformed"):
+            with self.subTest(failure=failure):
+                path = self.point(contents=os.urandom(8192))
+                sidecar = Path(str(path) + ".sha256")
+                if failure == "corrupt":
+                    data = bytearray(path.read_bytes()); data[30] ^= 1
+                    path.write_bytes(data); self.checksum(path)
+                elif failure == "truncate":
+                    path.write_bytes(path.read_bytes()[:-5]); self.checksum(path)
+                elif failure == "missing":
+                    sidecar.unlink()
+                elif failure == "mismatch":
+                    sidecar.write_text("0" * 64 + "  " + path.name + "\n")
+                else:
+                    sidecar.write_text("invalid sidecar")
+                with self.assertRaises(backup.BackupError):
+                    backup.verify_backup_integrity(path)
+
+    def test_combined_integrity_rejects_backup_and_sidecar_symlinks(self):
+        source = self.point()
+        target = self.directory / "foreign.sql.gz"
+        target.symlink_to(source)
+        with self.assertRaises(backup.BackupError):
+            backup.verify_backup_integrity(target)
+        sidecar = Path(str(source) + ".sha256")
+        original = self.directory / "original-sidecar"
+        sidecar.rename(original); sidecar.symlink_to(original)
+        with self.assertRaises(backup.BackupError):
+            backup.verify_backup_integrity(source)
+
+    def test_combined_integrity_detects_file_changes_during_stream(self):
+        for change in ("backup", "sidecar"):
+            with self.subTest(change=change):
+                path = self.point(contents=os.urandom(65536))
+                original = backup._HashingReader.read
+                changed = False
+                def read(reader, size=-1):
+                    nonlocal changed
+                    data = original(reader, size)
+                    if data and not changed:
+                        changed = True
+                        selected = path if change == "backup" else Path(str(path) + ".sha256")
+                        with selected.open("ab") as stream:
+                            stream.write(b"x")
+                    return data
+                with patch.object(backup._HashingReader, "read", new=read):
+                    with self.assertRaises(backup.BackupError):
+                        backup.verify_backup_integrity(path)
+
+    def test_worker_requires_dedicated_credentials_without_root_fallback(self):
+        for env in ({}, {"DATABASE_USER": "root", "DATABASE_PASSWORD": "synthetic-root-only"},
+                    {"BACKUP_DB_USER": "root", "BACKUP_DB_PASSWORD": "synthetic-backup-only"},
+                    {"BACKUP_DB_USER": "backup_user", "BACKUP_DB_PASSWORD": "REPLACE_EXAMPLE"}):
+            with self.assertRaises(backup.BackupError):
+                backup.Config.from_env(env)
+        config = backup.Config.from_env({"BACKUP_DB_USER": "backup_user", "BACKUP_DB_PASSWORD": "synthetic-backup-only",
+                                         "DATABASE_USER": "root", "DATABASE_PASSWORD": "ignored-root-value"})
+        self.assertEqual(config.user, "backup_user")
+
 
 
 class BackupSchedulerTests(SimpleTestCase):
@@ -615,6 +790,7 @@ class BackupComposeTests(SimpleTestCase):
             **os.environ, "ENV_FILE": str(self.environment_file), "COMPOSE_PROJECT_NAME": "minikandoo-config-test",
             "SECRET_KEY": "configuration-only-test-key-never-production-" + "x" * 50,
             "DATABASE_PASSWORD": "configuration-test-only", "MARIADB_ROOT_PASSWORD": "configuration-root-test-only",
+            "BACKUP_DB_USER": "test_backup", "BACKUP_DB_PASSWORD": "configuration-backup-test-only",
             "ZIBAL_MERCHANT": "configuration-test-only", "BACKUP_HOST_DIR": str(self.temporary / "backups"),
         }
 
@@ -652,6 +828,21 @@ class BackupComposeTests(SimpleTestCase):
         self.assertTrue(all("docker.sock" not in item.get("source", "") for item in service["volumes"]))
         self.assertNotIn("db-backup", config["services"]["web"]["depends_on"])
 
+    def test_worker_does_not_receive_root_credentials_and_provisioning_is_profile_scoped(self):
+        result = self.compose("--profile", "backup-admin", "config", "--format", "json")
+        self.assertEqual(result.returncode, 0, "Provisioning Compose configuration failed")
+        services = json.loads(result.stdout)["services"]
+        worker = services["db-backup"]
+        self.assertEqual(worker["environment"]["BACKUP_DB_USER"], "test_backup")
+        self.assertNotIn("MARIADB_ROOT_PASSWORD", worker["environment"])
+        self.assertNotIn("DATABASE_PASSWORD", worker["environment"])
+        provision = services["db-backup-provision"]
+        self.assertEqual(provision["profiles"], ["backup-admin"])
+        self.assertEqual(provision["restart"], "no")
+        self.assertEqual(provision["depends_on"]["db"]["condition"], "service_healthy")
+        self.assertFalse(provision.get("ports"))
+        self.assertFalse(provision.get("volumes"))
+
     def test_manual_wrapper_uses_same_compose_project_and_worker(self):
         bin_directory = self.temporary / "bin"
         bin_directory.mkdir()
@@ -670,3 +861,57 @@ class BackupComposeTests(SimpleTestCase):
         rejected = subprocess.run([str(ROOT / "scripts/backup-production-db"), "/different/directory"],
                                   env=env, capture_output=True, text=True, timeout=10)
         self.assertEqual(rejected.returncode, 2)
+
+
+class BackupProvisionTests(SimpleTestCase):
+    def setUp(self):
+        from scripts import db_backup_provision
+        self.provision = db_backup_provision
+        self.env = {"DATABASE_NAME": "synthetic_database", "BACKUP_DB_USER": "backup_test",
+                    "BACKUP_DB_PASSWORD": "synthetic-private-'\\-value", "MARIADB_ROOT_PASSWORD": "synthetic-root-only",
+                    "APPLICATION_DB_USER": "application_test"}
+
+    def test_provisioning_is_explicit_scoped_and_password_rotation_is_optional(self):
+        output = io.StringIO()
+        with patch.object(self.provision, "execute", side_effect=[b"0\t0", b"", b"0\t0", b""]) as execute, redirect_stdout(output):
+            self.provision.provision(env=self.env)
+            self.provision.provision(env=self.env, rotate_password=True, allow_lock_all=True)
+        first, rotated = execute.call_args_list[1].args[1], execute.call_args_list[3].args[1]
+        self.assertIn("CREATE USER IF NOT EXISTS", first)
+        self.assertNotIn("ALTER USER", first)
+        self.assertIn("ALTER USER", rotated)
+        self.assertIn("GRANT SELECT, SHOW VIEW, TRIGGER, EVENT", first)
+        self.assertIn("GRANT SELECT ON mysql.proc", first)
+        self.assertNotIn("GRANT RELOAD", first)
+        self.assertIn("GRANT RELOAD ON *.*", rotated)
+        self.assertNotIn("GRANT ALL", first)
+        self.assertNotIn(self.env["BACKUP_DB_PASSWORD"], output.getvalue())
+        self.assertNotIn(self.env["MARIADB_ROOT_PASSWORD"], output.getvalue())
+
+    def test_invalid_or_shared_account_fails_before_sql(self):
+        for user in ("root", "bad'username", "application_test"):
+            with patch.object(self.provision, "execute") as execute:
+                with self.assertRaises(backup.BackupError):
+                    self.provision.provision(env={**self.env, "BACKUP_DB_USER": user})
+                execute.assert_not_called()
+
+    def test_existing_roles_or_host_accounts_fail_closed(self):
+        with patch.object(self.provision, "execute", return_value=b"1\t0") as execute:
+            with self.assertRaises(backup.BackupError):
+                self.provision.provision(env=self.env)
+        self.assertEqual(execute.call_count, 1)
+
+    def test_provisioning_sql_escaping_preserves_literal_password(self):
+        value = "quote'and\\backslash"
+        self.assertEqual(self.provision.sql_string(value), "'quote''and\\backslash'")
+        with self.assertRaises(backup.BackupError):
+            self.provision.sql_string("invalid\x00value")
+
+    def test_provisioning_grants_only_the_literal_database_name(self):
+        self.assertEqual(self.provision.sql_database_pattern("shop_data%`\\"), "`shop\\_data\\%``\\\\`")
+        with patch.object(self.provision, "execute", side_effect=[b"0\t0", b""]) as execute, redirect_stdout(io.StringIO()):
+            self.provision.provision(env=self.env)
+        self.assertIn("ON `synthetic\\_database`.*", execute.call_args_list[1].args[1])
+        for value in ("", "invalid\x00name", "invalid\nname"):
+            with self.assertRaises(backup.BackupError):
+                self.provision.sql_database_pattern(value)

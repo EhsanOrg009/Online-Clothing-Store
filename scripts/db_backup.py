@@ -44,6 +44,10 @@ class BackupError(Exception):
     """Messages contain operational facts only, never client errors or SQL."""
 
 
+class BackupCapacityError(BackupError):
+    pass
+
+
 class BackupBusy(BackupError):
     pass
 
@@ -86,8 +90,8 @@ class Config:
         env = os.environ if env is None else env
         config = cls(
             directory=Path(env.get("BACKUP_DIRECTORY", "/backups")),
-            database=env.get("DATABASE_NAME", ""), user=env.get("DATABASE_USER", ""),
-            password=env.get("DATABASE_PASSWORD", ""), host=env.get("DATABASE_HOST", "db"),
+            database=env.get("DATABASE_NAME", ""), user=env.get("BACKUP_DB_USER", ""),
+            password=env.get("BACKUP_DB_PASSWORD", ""), host=env.get("DATABASE_HOST", "db"),
             port=_integer(env, "DATABASE_PORT", 3306, 1),
             recent=_integer(env, "BACKUP_RETENTION_RECENT", 48, 1),
             daily_days=_integer(env, "BACKUP_RETENTION_DAILY_DAYS", 7),
@@ -103,6 +107,7 @@ class Config:
             raise BackupError("BACKUP_NON_TRANSACTIONAL_POLICY must be refuse or lock-all.")
         if config.port > 65535:
             raise BackupError("Invalid DATABASE_PORT.")
+        validate_backup_credentials(config.user, config.password)
         return config
 
 
@@ -161,36 +166,81 @@ def _regular_file(path):
     return info
 
 
-def verify_backup_checksum(path, *, sidecar=None, expected_filename=None):
-    """Compare the actual digest to the recorded sidecar; never trust its path.
+def _file_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
-    Legacy sidecars can contain the original absolute host path. Match its
-    basename, then hash the requested file (e.g. its read-only container mount).
-    """
-    path = Path(path)
-    sidecar = Path(sidecar) if sidecar is not None else Path(str(path) + ".sha256")
-    info = _regular_file(path)
-    side_info = _regular_file(sidecar)
+
+@contextmanager
+def _verified_inputs(path, sidecar, expected_filename):
+    path, sidecar = Path(path), Path(sidecar)
+    info, side_info = _regular_file(path), _regular_file(sidecar)
+    if not info.st_size or side_info.st_size > 1024:
+        raise BackupError("Empty backup or invalid checksum sidecar size.")
     try:
-        if not info.st_size or side_info.st_size > 1024:
-            raise BackupError("Empty backup or invalid checksum sidecar size.")
-        match = re.fullmatch(r"([0-9a-fA-F]{64}) ([ *])([^\r\n]+)\n?", sidecar.read_text("ascii"))
-        if not match or Path(match[3]).name != (expected_filename or path.name):
+        with os.fdopen(os.open(sidecar, os.O_RDONLY | os.O_NOFOLLOW), "rb") as recorded:
+            if _file_identity(os.fstat(recorded.fileno())) != _file_identity(side_info):
+                raise BackupError("Checksum sidecar changed during verification.")
+            text = recorded.read(1025).decode("ascii")
+        match = re.fullmatch(r"([0-9a-fA-F]{64}) ([ *])([^\r\n]+)\n?", text)
+        if not match or Path(match[3]).name != expected_filename:
             raise BackupError("Malformed SHA256 sidecar or backup filename mismatch.")
-        with path.open("rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        if not hmac.compare_digest(match[1].lower(), digest):
-            raise BackupError("Recorded SHA256 does not match the backup.")
-        after = _regular_file(path)
-        side_after = _regular_file(sidecar)
-        for before, current in ((info, after), (side_info, side_after)):
-            if (before.st_ino, before.st_size, before.st_mtime_ns) != (
-                current.st_ino, current.st_size, current.st_mtime_ns,
-            ):
-                raise BackupError("Backup or sidecar changed during verification.")
-        return digest
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+            if _file_identity(os.fstat(stream.fileno())) != _file_identity(info):
+                raise BackupError("Backup changed during verification.")
+            yield stream, match[1].lower()
+            if _file_identity(os.fstat(stream.fileno())) != _file_identity(info):
+                raise BackupError("Backup changed during verification.")
+        if (_file_identity(_regular_file(path)) != _file_identity(info)
+                or _file_identity(_regular_file(sidecar)) != _file_identity(side_info)):
+            raise BackupError("Backup or sidecar changed during verification.")
     except (OSError, UnicodeError, ValueError) as exc:
         raise BackupError("Backup or checksum sidecar is unreadable.") from exc
+
+
+def verify_backup_checksum(path, *, sidecar=None, expected_filename=None):
+    """Hash the selected file, comparing with its recorded sidecar, without symlinks."""
+    path = Path(path)
+    sidecar = Path(sidecar) if sidecar is not None else Path(str(path) + ".sha256")
+    with _verified_inputs(path, sidecar, expected_filename or path.name) as (stream, expected):
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if not hmac.compare_digest(expected, digest):
+            raise BackupError("Recorded SHA256 does not match the backup.")
+    return digest
+
+
+class _HashingReader:
+    """Sequential gzip input; SHA256 sees each original compressed byte once."""
+    def __init__(self, stream):
+        self.stream, self.digest = stream, hashlib.sha256()
+        self.bytes_read = 0
+
+    def read(self, size=-1):
+        data = self.stream.read(size)
+        self.digest.update(data)
+        self.bytes_read += len(data)
+        return data
+
+
+def verify_backup_integrity(path):
+    """One streaming pass validates recorded SHA256, all gzip members/CRC and EOF."""
+    path = Path(path)
+    with _verified_inputs(path, Path(str(path) + ".sha256"), path.name) as (stream, expected):
+        reader = _HashingReader(stream)
+        size = 0
+        try:
+            with gzip.GzipFile(fileobj=reader, mode="rb") as dump:
+                while chunk := dump.read(1024 * 1024):
+                    size += len(chunk)
+        except (OSError, EOFError, ValueError, zlib.error) as exc:
+            raise BackupError("Backup gzip integrity verification failed.") from exc
+        if not size:
+            raise BackupError("Database dump is empty.")
+        if reader.bytes_read != os.fstat(stream.fileno()).st_size:
+            raise BackupError("Compressed backup was not fully verified.")
+        digest = reader.digest.hexdigest()
+        if not hmac.compare_digest(expected, digest):
+            raise BackupError("Recorded SHA256 does not match the backup.")
+    return digest, size
 
 
 def verify_gzip(path):
@@ -228,8 +278,7 @@ def scan_recovery_points(directory):
             continue  # Legacy/unrelated names are never retention candidates.
         try:
             stamp = datetime.strptime(match[1], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-            digest = verify_backup_checksum(path)
-            size = verify_gzip(path)
+            digest, size = verify_backup_integrity(path)
             valid.append(RecoveryPoint(path, stamp, path.stat().st_size, size, digest))
         except (BackupError, ValueError):
             invalid.append(path.name)
@@ -284,15 +333,15 @@ def make_retention_plan(config, *, now=None):
     }
 
 
-def _retention_locked(config, *, dry_run=False, now=None):
+def _retention_locked(config, *, dry_run=False, now=None, reason="scheduled"):
     plan = make_retention_plan(config, now=now)
     preview = dry_run or config.retention_mode == "dry-run"
-    log("retention_plan", mode="dry-run" if preview else "apply", **plan)
+    log("retention_plan", mode="dry-run" if preview else "apply", reason=reason, **plan)
     deleted = 0
     if not preview:
         for name in plan["delete"]:
             path = config.directory / name
-            verify_backup_checksum(path)  # Recheck immediately before deletion.
+            verify_backup_integrity(path)  # Recheck the complete pair immediately before deletion.
             # Both files are managed and removed under the same persistent lock.
             path.unlink()
             Path(str(path) + ".sha256").unlink()
@@ -340,20 +389,35 @@ def _option_value(value):
     ).replace("\r", "\\r").replace("\t", "\\t") + '"'
 
 
+def validate_backup_credentials(user, password):
+    if (not isinstance(user, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,31}", user)
+            or user.lower() in ("root", "mysql")
+            or not isinstance(password, str) or not password or "\x00" in password
+            or password.startswith("REPLACE_")):
+        raise BackupError("Dedicated BACKUP_DB_USER and BACKUP_DB_PASSWORD are missing or invalid; root fallback is forbidden.")
+
+
 @contextmanager
 def client_options(config):
-    if not all((config.database, config.user, config.password, config.host)):
+    validate_backup_credentials(config.user, config.password)
+    with mariadb_client_options(config.database, config.user, config.password, config.host, config.port) as options:
+        yield options
+
+
+@contextmanager
+def mariadb_client_options(database, user, password, host, port):
+    if not all((database, user, password, host)):
         raise BackupError("Database client configuration is incomplete.")
-    if config.database.startswith("-") or any(c in config.database for c in "\x00\n\r"):
+    if database.startswith("-") or any(c in database for c in "\x00\n\r"):
         raise BackupError("Invalid database name.")
     with tempfile.TemporaryDirectory(prefix="minikandoo-mariadb-client-") as temporary:
         path = Path(temporary) / "client.cnf"
         with path.open("x", encoding="utf-8") as stream:
             os.chmod(path, 0o600)
             stream.write("[client]\nprotocol=tcp\ndefault-character-set=utf8mb4\n")
-            for key, value in (("host", config.host), ("user", config.user), ("password", config.password)):
+            for key, value in (("host", host), ("user", user), ("password", password)):
                 stream.write(f"{key}={_option_value(value)}\n")
-            stream.write(f"port={config.port}\n")
+            stream.write(f"port={port}\n")
         yield path
 
 
@@ -405,9 +469,9 @@ def capacity_check(config, engines, points):
     log("capacity_check", bytes_used=used, available_bytes=free,
         estimated_new_bytes=estimate, min_free_bytes=reserve, max_total_bytes=config.max_total_bytes)
     if free < estimate + reserve:
-        raise BackupError("Insufficient free disk space for the estimated dump and free-space reserve.")
+        raise BackupCapacityError("Insufficient free disk space for the estimated dump and free-space reserve.")
     if config.max_total_bytes is not None and used + estimate > config.max_total_bytes:
-        raise BackupError("Backup storage capacity limit would be exceeded; previous recovery points preserved.")
+        raise BackupCapacityError("Backup storage capacity limit would be exceeded; previous recovery points preserved.")
     return used, reserve
 
 
@@ -439,7 +503,7 @@ def _dump_to_gzip(config, options, partial, consistency_flag, used, reserve, sto
             # dump and compression together, including an unreachable server.
             dump = subprocess.Popen(
                 ["mariadb-dump", f"--defaults-file={options}",
-                 consistency_flag, "--quick", "--routines", "--events", "--triggers", "--hex-blob",
+                 consistency_flag, "--quick", "--routines", "--events", "--triggers", "--hex-blob", "--no-tablespaces",
                  config.database], stdout=compressor.stdin, stderr=subprocess.DEVNULL,
                 env=client_environment(),
             )
@@ -505,7 +569,18 @@ def perform_backup(config, *, now=None, stop_event=None):
             consistency_flag = "--lock-all-tables" if non_transactional else "--single-transaction"
             log("dump_strategy", consistency=consistency_flag)
             points, invalid = scan_recovery_points(config.directory)
-            used, reserve = capacity_check(config, engines, points)
+            try:
+                used, reserve = capacity_check(config, engines, points)
+            except BackupCapacityError:
+                # Keep the same exclusive lock through plan, cleanup and recheck.
+                _retention_locked(config, now=now, reason="capacity_pressure")
+                if config.retention_mode == "dry-run":
+                    raise BackupCapacityError("Insufficient free disk space or capacity limit; retention dry-run only, no files deleted.")
+                points, invalid = scan_recovery_points(config.directory)
+                try:
+                    used, reserve = capacity_check(config, engines, points)
+                except BackupCapacityError as exc:
+                    raise BackupCapacityError(str(exc) + " Capacity remains insufficient after eligible retention; protected recovery points preserved.") from exc
             partial = _temporary(config.directory, name)
             _dump_to_gzip(config, options, partial, consistency_flag, used, reserve, stop_event)
         try:
@@ -551,7 +626,8 @@ def perform_backup(config, *, now=None, stop_event=None):
         log("backup_completed", filename=name, size_bytes=point.size, uncompressed_bytes=uncompressed_size,
             checksum_verified=True, bytes_used=storage_bytes(config.directory),
             available_bytes=shutil.disk_usage(config.directory).free, invalid_backups_preserved=len(invalid))
-        # No cleanup on any failed dump/validation/publication attempt.
+        # Post-success cleanup only; capacity preflight can remove already-eligible
+        # old pairs, but never any of the protected recovery set.
         _retention_locked(config)
         return point
 

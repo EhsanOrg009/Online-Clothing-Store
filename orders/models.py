@@ -54,7 +54,7 @@ class OrderQuerySet(models.QuerySet):
             inventory_released=False,
             expires_at__isnull=False,
             expires_at__lt=now,
-        )
+        ).exclude(payments__status=PaymentStatus.MANUAL_REVIEW)
 
 
 class Order(TimeStampedModel):

@@ -19,7 +19,10 @@ from payments.gateways import PaymentGatewayError, get_gateway
 from payments.gateways.zibal import _track_id
 from payments.gateways.zibal_time import confirmed_zone
 from payments.models import Payment
-from payments.services import PaymentError, classify_receipt, process_callback
+from payments.services import (
+    PaymentError, classify_receipt, process_callback, potentially_successful_receipt,
+    receipt_history_fingerprint, recovery_receipt_snapshot, _authorize_recovery_primary,
+)
 from scripts.db_backup import BackupError, protect_recovery_backup, verify_backup_checksum
 
 
@@ -150,6 +153,15 @@ class Command(BaseCommand):
                 raise CommandError("--apply requires --backup and its recorded .sha256; no records changed.")
             report["backup"] = validate_backup(options["backup"], connection.settings_dict["NAME"])
 
+        manual = [p for p in payments if p.status == PaymentStatus.MANUAL_REVIEW]
+        potential = {p.authority for p in payments if potentially_successful_receipt(p)}
+        report["existing_manual_review_receipts"] = [p.authority for p in manual]
+        report["unselected_manual_review_receipts"] = [p.authority for p in manual if p.authority not in track_ids]
+        report["historical_non_zibal_receipts"] = [p.authority for p in payments if p.gateway != "zibal"]
+        report["incomplete_inquiries"] = []
+        report["primary_selection_blockers"] = []
+        if report["unselected_manual_review_receipts"]:
+            report["blocking_issues"].append("Unselected manual-review receipts prevent primary selection.")
         primary = [payment for payment in payments if payment.is_successful and not payment.needs_refund]
         verified = {}
         for payment in payments:
@@ -157,7 +169,7 @@ class Command(BaseCommand):
             evidence = report["gateway"][payment.authority] = {}
             if payment.gateway != "zibal":
                 evidence["error"] = "Historical gateway requires an independent audit."
-                if payment.is_successful or payment.paid_at:
+                if potentially_successful_receipt(payment):
                     report["blocking_issues"].append("A historical successful receipt needs independent validation.")
                 continue
             try:
@@ -180,15 +192,20 @@ class Command(BaseCommand):
                 evidence["status"] = status
                 if status != 1:
                     evidence["verified"] = False
-                    if payment.is_successful or payment.paid_at or status == 2:
+                    if potentially_successful_receipt(payment) or status == 2:
                         raise PaymentGatewayError("A recorded or potentially paid receipt is not gateway-verified.")
+                    report["incomplete_inquiries"].append(payment.authority)
                     continue
                 result = gateway._verified_result(payment, data, 100)
-                if payment.reference_id and (
-                    payment.reference_id != result.reference_id or payment.transaction_id != payment.authority
+                if (payment.transaction_id and payment.transaction_id != result.transaction_id) or (
+                    payment.reference_id and (payment.reference_id != result.reference_id
+                                             or payment.transaction_id != result.transaction_id)
                 ):
                     raise PaymentGatewayError("Recorded receipt identifiers differ from gateway evidence.")
-                decision = classify_receipt(order, result.gateway_paid_at, result.timestamp_issue)
+                decision = classify_receipt(
+                    order, result.gateway_paid_at, result.timestamp_issue,
+                    other_manual_receipt=any(p.pk != payment.pk for p in manual),
+                )
                 evidence.update({
                     "verified": True, "reference_id": result.reference_id,
                     "paid_at": timestamp_for_report(data.get("paidAt")),
@@ -199,7 +216,8 @@ class Command(BaseCommand):
                 verified[payment.authority] = result
             except PaymentGatewayError as exc:
                 evidence.update({"verified": False, "error": str(exc)})
-                if payment.authority not in track_ids or payment.is_successful or payment.paid_at:
+                report["incomplete_inquiries"].append(payment.authority)
+                if payment.authority not in track_ids or potentially_successful_receipt(payment):
                     report["blocking_issues"].append(f"Order history could not be validated for {payment.authority}.")
 
         chronological = sorted(
@@ -210,6 +228,30 @@ class Command(BaseCommand):
         report["gateway_time_order"] = chronological
         report["ambiguous_timestamps"] = ambiguous
         report["duplicate_successful_payments"] = list(verified) if len(verified) > 1 else []
+        potential.update(verified)
+        report["potentially_successful_receipts"] = sorted(potential)
+        report["confirmed_successful_receipts"] = list(verified)
+        unresolved = potential - set(verified)
+        unselected = [key for key in potential if key not in track_ids and (
+            not order.is_paid or not by_authority[key].is_successful
+        )]
+        report["unselected_potentially_successful_receipts"] = sorted(unselected)
+        if unselected:
+            report["blocking_issues"].append("Include all potentially successful unrecovered receipts explicitly: " + ", ".join(sorted(unselected)))
+        if unresolved:
+            report["blocking_issues"].append("Potentially successful receipts have incomplete validation: " + ", ".join(sorted(unresolved)))
+        independent_review = [p.authority for p in manual if p.metadata.get("decision", {}).get("reason") in (
+            "future_timestamp", "previous_future_timestamp", "gateway_receipt_conflict",
+            "receipt_identifiers_changed", "payment_identity_changed_during_verification",
+        )]
+        selection_blockers = report["primary_selection_blockers"]
+        selection_blockers.extend(report["blocking_issues"])
+        if ambiguous:
+            selection_blockers.append("Ambiguous gateway timestamps prevent unique primary selection.")
+        if independent_review:
+            selection_blockers.append("Previously conflicting or future receipts require independent human review.")
+        if any(key not in verified for key in track_ids):
+            selection_blockers.append("Not every selected transaction has a validated successful Inquiry.")
         report["planned_primary"] = None
         if order.is_paid:
             if len(primary) != 1 or primary[0].authority not in verified:
@@ -218,13 +260,29 @@ class Command(BaseCommand):
                 report["planned_primary"] = primary[0].authority
         elif primary:
             report["blocking_issues"].append("An unpaid order already has a primary receipt; review the ledger.")
-        elif not ambiguous:
-            report["planned_primary"] = next((
-                key for key in chronological if key in track_ids and report["gateway"][key]["action"] == "accept"
-            ), None)
-        unselected = [key for key in verified if key not in track_ids and not by_authority[key].is_successful]
-        if unselected:
-            report["blocking_issues"].append("Include all other confirmed unrecovered receipts explicitly: " + ", ".join(unselected))
+        elif not selection_blockers:
+            candidates = [key for key in chronological if key in track_ids and classify_receipt(
+                order, verified[key].gateway_paid_at, verified[key].timestamp_issue,
+            ).action == "accept"]
+            if candidates:
+                earliest = verified[candidates[0]].gateway_paid_at
+                if sum(verified[key].gateway_paid_at == earliest for key in candidates) == 1:
+                    report["planned_primary"] = candidates[0]
+                else:
+                    selection_blockers.append("Equal earliest gateway times do not establish a unique primary.")
+        report["recovery_plan"] = {
+            "order_id": order.pk, "inspected_payment_ids": sorted(p.pk for p in payments),
+            "selected_track_ids": track_ids, "potentially_successful_receipts": sorted(potential),
+            "primary": report["planned_primary"], "history_fingerprint": receipt_history_fingerprint(payments),
+            "receipts": {key: recovery_receipt_snapshot(result) for key, result in verified.items()},
+            "backup_sha256": report.get("backup", {}).get("sha256"),
+        }
+        authorization = False
+        if options["apply"] and not order.is_paid and report["planned_primary"] and not selection_blockers:
+            authorization = _authorize_recovery_primary(
+                order=order, payments=payments, verified=verified, selected_track_ids=track_ids,
+                primary=by_authority[report["planned_primary"]], backup=report["backup"], plan=report["recovery_plan"],
+            )
 
         replay_failures = []
         if options["apply"] and not report["blocking_issues"]:
@@ -238,11 +296,13 @@ class Command(BaseCommand):
                     payment = process_callback(
                         payment, {"success": "1", "status": "2", "trackId": track_id, "orderId": order.order_number},
                         gateway_timezone=gateway_timezone,
-                        allow_fulfillment=track_id == report["planned_primary"],
+                        allow_fulfillment=track_id == report["planned_primary"] and not selection_blockers,
+                        recovery_primary_authorized=authorization if track_id == report["planned_primary"] else False,
                         recovery_audit={
                             "source": "reconcile_zibal_payments", "backup_sha256": report["backup"]["sha256"],
                             "backup_file": Path(report["backup"]["file"]).name,
                             "selected_track_ids": track_ids, "planned_primary": report["planned_primary"],
+                            "recovery_plan": report["recovery_plan"],
                         },
                     )
                     report["replayed"].append({
@@ -274,5 +334,5 @@ class Command(BaseCommand):
         report["refund_execution"] = "No refund was requested or performed."
         self.stdout.write(json.dumps(report, default=str, ensure_ascii=False, indent=2))
         failed_preflight = any(not report["gateway"][track_id].get("verified") for track_id in track_ids)
-        if options["apply"] and (report["blocking_issues"] or replay_failures or failed_preflight):
+        if options["apply"] and (report["blocking_issues"] or replay_failures or failed_preflight or selection_blockers):
             raise CommandError("Recovery is incomplete or requires manual review. Read the sanitized report; no receipt was forced successful.")

@@ -2,6 +2,7 @@
 
 from django.contrib import admin, messages
 from django import forms
+from django.db.models import Count, Q
 from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
 
@@ -55,6 +56,7 @@ class OrderAdmin(admin.ModelAdmin):
         "customer_display",
         "status",
         "payment_status",
+        "manual_review_receipts",
         "total",
         "items_count",
         "tracking_number",
@@ -92,6 +94,7 @@ class OrderAdmin(admin.ModelAdmin):
         "created_at",
         "updated_at",
         "inventory_released",
+        "manual_review_receipts",
     )
     inlines = [OrderItemInline]
     date_hierarchy = "created_at"
@@ -107,6 +110,7 @@ class OrderAdmin(admin.ModelAdmin):
                     "customer",
                     "status",
                     "payment_status",
+                    "manual_review_receipts",
                     "tracking_number",
                     "customer_note",
                 )
@@ -161,6 +165,10 @@ class OrderAdmin(admin.ModelAdmin):
     @admin.display(description=_("اقلام"))
     def items_count(self, obj):
         return sum(item.quantity for item in obj.items.all())
+
+    @admin.display(description=_("رسیدهای نیازمند بررسی دستی"), ordering="manual_review_count")
+    def manual_review_receipts(self, obj):
+        return obj.manual_review_count
 
     def save_model(self, request, obj, form, change):
         """ویرایش فیلدها حفظ و تغییر وضعیت فقط از مسیر کنترل‌شده اعمال می‌شود."""
@@ -217,7 +225,9 @@ class OrderAdmin(admin.ModelAdmin):
             )
 
     def get_queryset(self, request):
-        return super().get_queryset(request).select_related("customer").prefetch_related("items")
+        return super().get_queryset(request).annotate(
+            manual_review_count=Count("payments", filter=Q(payments__status=PaymentStatus.MANUAL_REVIEW)),
+        ).select_related("customer").prefetch_related("items")
 
 
 @admin.register(OrderItem)

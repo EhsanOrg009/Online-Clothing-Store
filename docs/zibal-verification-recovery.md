@@ -1,6 +1,6 @@
 # بازیابی امن پرداخت زیبال
 
-این runbook برای نسخهٔ پس از `910c231f64e2c78677b21699c096e70bbf8756ec` است. کد و آزمون‌ها محلی آماده شده‌اند؛ اجرای فرمان‌های production، migration، recovery یا refund در این کار انجام نشده است. [قرارداد پرداخت و timezone](zibal-payment.md) و [عملیات بکاپ Docker](production-database-backups.md) را پیش از اجرا بخوانید.
+این runbook اصلاحات هدفمند پس از `45d5a5d0aa99022e00a13455925d7e69709d4fc0` را توضیح می‌دهد. کد و آزمون‌ها محلی آماده شده‌اند؛ اجرای فرمان‌های production، migration، recovery یا refund در این کار انجام نشده است. [قرارداد پرداخت و timezone](zibal-payment.md) و [عملیات بکاپ Docker](production-database-backups.md) را پیش از اجرا بخوانید.
 
 ## علت حادثه و وضعیت شواهد
 
@@ -40,7 +40,7 @@ raw timestamp خراب که احتمالاً متن دلخواه یا object ب�
 
 ## انتخاب primary و رفتار apply
 
-برای سفارش فعال و رزرو آزاد‌نشده، تنها رسید دارای زمان معتبر درون مهلت قابل پذیرش است. ترتیب انتخاب بر اساس `gateway_paid_at`، سپس زمان ایجاد و PK محلی است؛ ترتیب track ID و زمان callback ملاک نیستند. موارد مبهم مانع انتخاب خودکار primary هستند. یک سفارش پرداخت‌شده باید دقیقاً یک primary محلی داشته باشد که با Inquiry مستقل قابل اثبات باشد.
+برای سفارش فعال و رزرو آزاد‌نشده، تنها رسید دارای زمان معتبر درون مهلت قابل پذیرش است. primary بر اساس یکتابودن زودترین `gateway_paid_at` معتبر تعیین می‌شود؛ تساوی زمان درگاه با زمان ایجاد یا PK محلی شکسته نمی‌شود و نیازمند بررسی است. ترتیب track ID و زمان callback ملاک نیستند. موارد مبهم مانع انتخاب خودکار primary هستند. یک سفارش پرداخت‌شده باید دقیقاً یک primary محلی داشته باشد که با Inquiry مستقل قابل اثبات باشد.
 
 تاریخچهٔ نامعتبر، رسید تاریخی از درگاه دیگر، ledger ناسازگار و رسید تأییدشدهٔ دیگری که صریحاً انتخاب نشده است، application را مسدود می‌کنند. primary ثبت‌شده به‌طور خودکار عوض نمی‌شود. فقط track IDهای انتخابی replay می‌شوند.
 
@@ -49,6 +49,18 @@ raw timestamp خراب که احتمالاً متن دلخواه یا object ب�
 اگر replay primary timeout یا شکست بخورد، سایر رسیدهای زودهنگام به‌عنوان primary جایگزین نمی‌شوند؛ شواهد موفقشان در manual review می‌ماند. retry معتبر همان primary را یک بار نهایی و رسیدهای اضافه را برای refund handling علامت می‌زند. اگر بین preview و replay timestamp مبهم شود یا انقضا زودتر قفل بگیرد، fulfillment متوقف می‌شود. نتیجهٔ جزئی یا نیازمند review با گزارش روشن و exit غیرصفر برمی‌گردد؛ تکرار فرمان موفقیت‌های قبلی را دوباره اعمال نمی‌کند.
 
 `metadata.recovery_history` شامل منبع فرمان، SHA256 بکاپ، نام بکاپ، شناسه‌های انتخابی، primary برنامه‌ریزی‌شده و زمان مشاهده است. `verification_history`، raw `paidAt` و `decision` نیز حفظ می‌شوند. callback تکراری رسیدی که قبلاً successful شده فقط شمارنده را افزایش می‌دهد و رسید/fulfillment را بازنویسی نمی‌کند.
+
+## رسیدهای حل‌نشده و مجوز محدود primary
+
+کل history سفارش بررسی می‌شود: `MANUAL_REVIEW`، `paid_at`/`gateway_paid_at`، verification موفقِ فعلی یا آرشیوشده در `verification_history` حتی با status غیرنهایی، درگاه تاریخی و receiptهای خارج از `--track-id`. پاسخ ناموفق تازه شواهد موفق قدیمی را پاک نمی‌کند. برای primary تازهٔ سفارش هنوز پرداخت‌نشده، تمام رسیدهای بالقوه موفق باید صریحاً انتخاب شوند. گزارش بخش‌های مستقل `existing_manual_review_receipts`، `unselected_manual_review_receipts`، `unselected_potentially_successful_receipts`، `potentially_successful_receipts`، `confirmed_successful_receipts`، `incomplete_inquiries`، `ambiguous_timestamps` و `primary_selection_blockers` دارد.
+
+رسید دستیِ انتخاب‌نشده یا رسید بالقوه موفقِ بدون Inquiry معتبر، انتخاب primary و apply را مسدود می‌کند. timestamp مبهم، خطای selected Inquiry یا زمان‌های مساویِ زودترین receipt، primary یکتا ایجاد نمی‌کنند. در apply بدون primary، شواهد مجاز می‌توانند در بررسی دستی ثبت شوند؛ هیچ رسیدی به جای primaryِ نامعتبر promote نمی‌شود. referenceهای متعارض و timestamp قبلاً آینده نیازمند بررسی انسانی مستقل‌اند.
+
+فقط وقتی کل مجموعهٔ موفق صریحاً انتخاب و معتبر شده، فرمان یک مجوز داخلی برای همان primary می‌سازد. `metadata.recovery_history.recovery_plan` شامل همهٔ payment IDهای بررسی‌شده، شناسه‌های انتخابی، شواهد نرمال‌شده، primary، fingerprint history و SHA256 بکاپ است. این مجوز boolean یا گزینهٔ عمومی CLI نیست. callback زیر قفل، history و شواهد Verify تازه را با plan مقایسه می‌کند. تغییر هم‌زمان، اجازهٔ fulfillment را از بین می‌برد. مجوز cancellation، inventory release، deadline، future time، reference یا idempotency را دور نمی‌زند.
+
+پس از پذیرش primary، receiptهای موفقِ اضافه بدون fulfillment دوم برای refund handling ثبت می‌شوند؛ receipt مبهم همچنان manual می‌ماند. سفارش دارای receipt دستی از انقضای خودکار و آزادسازی stock مستثناست. پشتیبانی باید پرونده را سریع با این فرمان و شواهد رسمی حل کند؛ ویرایش مستقیم فیلدهای مالی یا refund/fulfillment یک‌کلیکی وجود ندارد.
+
+HTTP خارج از تراکنشِ قفل‌دار است. اگر انقضا هنگام انتظار برای Verify زودتر commit کند، receipt بعدی سفارش را احیا نمی‌کند. اگر application معتبر callback اول commit کند، انقضا paid بودن را دوباره بررسی می‌کند. receipt دستی که پس از انتخاب candidate انقضا ثبت شده نیز با check دومِ زیر قفل از آزادسازی موجودی محافظت می‌شود.
 
 ## الزام بکاپ برای apply
 
@@ -92,7 +104,9 @@ scripts/compose-production config --quiet
 دستورهای آماده برای مرحلهٔ build و migration، **فقط پس از اجازهٔ استقرار**:
 
 ```sh
-scripts/compose-production build web db-backup
+scripts/compose-production --profile backup-admin build web db-backup db-backup-provision
+# پس از تنظیم credential جداگانهٔ بکاپ در محیط خصوصی و healthy بودن DB:
+scripts/compose-production --profile backup-admin run --rm -T db-backup-provision
 scripts/backup-production-db
 # پس از بررسی completion، SHA256 و gzip و توقف سایر نویسنده‌های سفارش:
 scripts/compose-production stop web db-backup
@@ -137,9 +151,9 @@ entrypoint مستقیم Python مانع collectstatic/migration/seed ناخوا�
 
 ## آزمون و حدود اعتبار
 
-در محیط محلی، suite کامل SQLite دارای ۴۲۳ تست با پنج skip برای قفل ردیفی و suite کامل MariaDB دارای ۴۲۳ تست بدون skip موفق شد. پنج آزمون واقعی concurrency شامل callback-first و expiry-first هستند. forward/backward migration، انواع reference، timezone/DST/future، delayed callback، رسیدهای اضافه، retries و partial failure پوشش داده شده‌اند. Docker integration نیز build، اتصال داخلی، manual backup، flock بین کانتینرها، restart، قطع دیتابیس، برگشت سرویس و restore SQL واقعی در target موقت را بررسی می‌کند. همهٔ پاسخ‌های زیبال و داده‌های این آزمون‌ها مصنوعی‌اند.
+suite شامل رگرسیون receipt دستیِ قبل از callback دوم، تاریخچهٔ ناقص/انتخاب‌نشده، مجوز محدود recovery، رزرو دستی، fingerprint متغیر و primary یکتا است. `TransactionTestCase` روی MariaDB، HTTP کند بدون قفل، expiry هنگام HTTP، هر دو ترتیب قفل، receipt دستی پس از candidate selection، callbackهای هم‌زمان و حفظ reference قطعی را آزمایش می‌کند. SQLite اثبات قفل ردیفی نیست. نتایج واقعی اجرای این نسخه در گزارش تحویل ثبت می‌شوند؛ نتایج نسخهٔ قبلی جایگزین اجرای دوباره نیستند.
 
-۹ سناریوی موجود Playwright/Chrome نیز روی localhost، با fixtureهای محافظت‌شده و صفر درخواست مالی واقعی موفق شدند: Referer/انتقال با و بدون JavaScript، شکست/انصراف/تلاش مجدد، موفقیت، callback تکراری و خرید کامل. `check --deploy` با محیط خصوصی مصنوعی و MariaDB جداگانه موفق بود؛ فقط هشدار موجود `security.W004` برای HSTS صفر باقی ماند.
+Docker driver از حساب بکاپ جداگانه، provisioning کوتاه‌عمر، rotation، مجوزهای محدود، capacity cleanup و restore واقعی target موقت استفاده می‌کند. هیچ داده یا درخواست مالی production در این آزمون‌ها استفاده نمی‌شود.
 
 ```sh
 PYTHONPATH=scripts/qa .venv/bin/python manage.py test --settings=shop_test_settings --noinput

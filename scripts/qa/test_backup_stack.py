@@ -58,11 +58,14 @@ class BackupStackQA:
         )
         app_subnet, proxy_subnet = self.choose_subnets()
         self.password = secrets.token_urlsafe(24)
+        self.backup_password = secrets.token_urlsafe(24)
         self.database = "minikandoo_qa_" + self.token
         values = {
             "COMPOSE_PROJECT_NAME": self.project, "SECRET_KEY": secrets.token_urlsafe(54),
             "DATABASE_NAME": self.database, "DATABASE_USER": "qa_app", "DATABASE_PASSWORD": secrets.token_urlsafe(24),
-            "MARIADB_ROOT_PASSWORD": self.password, "ZIBAL_MERCHANT": "qa-only-no-api-calls",
+            "MARIADB_ROOT_PASSWORD": self.password,
+            "BACKUP_DB_USER": "qa_backup_" + self.token, "BACKUP_DB_PASSWORD": self.backup_password,
+            "ZIBAL_MERCHANT": "qa-only-no-api-calls",
             "SMS_API_KEY": "", "SMS_API_SECRET": "", "SMS_SENDER": "",
             "APP_SUBNET": app_subnet, "PROXY_SUBNET": proxy_subnet,
             "NGINX_PROXY_IP": str(ipaddress.ip_network(proxy_subnet).network_address + 2),
@@ -73,7 +76,7 @@ class BackupStackQA:
         self.environment_file.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
         self.environment_file.chmod(0o600)
         self.redacted_values = [values[key] for key in (
-            "SECRET_KEY", "DATABASE_PASSWORD", "MARIADB_ROOT_PASSWORD",
+            "SECRET_KEY", "DATABASE_PASSWORD", "MARIADB_ROOT_PASSWORD", "BACKUP_DB_PASSWORD",
         )]
         self.env = {**os.environ, **values, "ENV_FILE": str(self.environment_file)}
         self.restore_name = self.project + "-restore"
@@ -154,16 +157,34 @@ class BackupStackQA:
             phase=phase, input=input, expected=expected,
         )
 
-    def sql(self, sql, *, phase, extra_env=(), database=True):
+    def admin_python(self, code, *, phase, input=None, extra_env=(), mounts=(), expected=0):
+        return self.compose(
+            "--profile", "backup-admin", "run", "--rm", "--no-deps", "-T", "--entrypoint", "python3",
+            *extra_env, *mounts, "db-backup-provision", "-c",
+            "import sys, os; sys.path.insert(0, '/opt/minikandoo'); import db_backup as b; " + code,
+            phase=phase, input=input, expected=expected,
+        )
+
+    def sql(self, sql, *, phase, extra_env=(), database=True, admin=True, expected=0):
+        context = (
+            "b.mariadb_client_options(config.database, 'root', os.environ['MARIADB_ROOT_PASSWORD'], config.host, config.port)"
+            if admin else "b.client_options(config)"
+        )
         code = (
             "import subprocess; config = b.Config.from_env();\n"
-            "with b.client_options(config) as options:\n"
+            "with " + context + " as options:\n"
             " result = subprocess.run(['mariadb', '--defaults-file=' + str(options), '--batch', '--skip-column-names']"
             + (" + [config.database]" if database else "")
             + ", input=sys.stdin.buffer.read(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=b.client_environment());\n"
             " sys.stdout.buffer.write(result.stdout); sys.exit(result.returncode)\n"
         )
-        return self.worker_python(code, phase=phase, input=sql, extra_env=extra_env)
+        helper = self.admin_python if admin else self.worker_python
+        return helper(code, phase=phase, input=sql, extra_env=extra_env, expected=expected)
+
+    def provision(self, *args, phase, extra_env=()):
+        return self.compose("--profile", "backup-admin", "run", "--rm", "--no-deps", "-T",
+                            *extra_env, "db-backup-provision", *args, phase=phase)
+
 
     def run_checks(self, *, skip_django=False):
         self.compose("config", "--quiet", phase="production Compose syntax")
@@ -174,8 +195,17 @@ class BackupStackQA:
         assert service["read_only"] and service["cap_drop"] == ["ALL"]
         assert service["volumes"][0]["source"] == str(self.backups)
         assert service["depends_on"]["db"]["condition"] == "service_healthy"
+        assert service["environment"]["BACKUP_DB_USER"] != "root"
+        assert "MARIADB_ROOT_PASSWORD" not in service["environment"]
+        assert "DATABASE_PASSWORD" not in service["environment"]
+        admin_config = json.loads(self.compose("--profile", "backup-admin", "config", "--format", "json",
+                                               phase="profile-scoped provisioning configuration").stdout)["services"]["db-backup-provision"]
+        assert admin_config["profiles"] == ["backup-admin"] and admin_config["restart"] == "no"
+        assert not admin_config.get("ports") and not admin_config.get("volumes")
+        assert admin_config["depends_on"]["db"]["condition"] == "service_healthy"
         self.check("Compose mount, healthy DB dependency, network and security")
-        self.compose("build", "db-backup", phase="backup image build", timeout=900)
+        self.check("worker has dedicated credentials; root provisioning is short-lived and profile-scoped")
+        self.compose("--profile", "backup-admin", "build", "db-backup", "db-backup-provision", phase="backup and provisioning image build", timeout=900)
         self.check("backup image build")
         self.compose("up", "-d", "--wait", "--wait-timeout", "120", "db", phase="isolated MariaDB startup")
         port = self.compose("port", "db", "3306", phase="isolated loopback DB port").stdout.strip().rsplit(":", 1)[1]
@@ -205,12 +235,58 @@ class BackupStackQA:
         self.sql(
             "CREATE TABLE backup_restore_probe (id int PRIMARY KEY, value varchar(64) UNIQUE) ENGINE=InnoDB;\n"
             "CREATE TABLE backup_trigger_probe (id int) ENGINE=InnoDB;\n"
+            "CREATE VIEW qa_probe_view AS SELECT id FROM backup_restore_probe;\n"
             "CREATE TRIGGER qa_probe_trigger AFTER INSERT ON backup_restore_probe FOR EACH ROW INSERT INTO backup_trigger_probe VALUES (NEW.id);\n"
             "CREATE PROCEDURE qa_probe_routine() SELECT COUNT(*) FROM backup_restore_probe;\n"
             "CREATE EVENT qa_probe_event ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 10 YEAR DO INSERT INTO backup_trigger_probe VALUES (999);\n"
             "INSERT INTO backup_restore_probe VALUES (1, 'synthetic first'), (2, 'synthetic second');\n",
             phase="synthetic restore probe tables, routine, trigger and event",
         )
+        self.provision(phase="dedicated backup account provisioning")
+        self.provision(phase="idempotent backup account provisioning")
+        identity = self.sql("SELECT CURRENT_USER();\n", phase="restricted account authenticates", admin=False)
+        assert identity.stdout.strip() == self.env["BACKUP_DB_USER"] + "@%"
+        server_version = self.sql("SELECT VERSION();\n", phase="isolated MariaDB server version", admin=False).stdout.strip()
+        self.report["mariadb_server_version"] = server_version
+        unrelated = self.database.replace("_", "x")
+        self.sql(
+            "CREATE DATABASE `" + unrelated + "`; CREATE TABLE `" + unrelated + "`.qa_foreign_probe (id int);\n",
+            phase="isolated similarly named database privilege fixture", database=False,
+        )
+        self.sql("SELECT COUNT(*) FROM `" + unrelated + "`.qa_foreign_probe;\n",
+                 phase="literal schema grants reject wildcard-matching unrelated database", database=False, admin=False, expected=1)
+        for query in ("CREATE USER 'qa_forbidden_admin'@'%';", "DELETE FROM backup_restore_probe;",
+                      "CREATE DATABASE qa_forbidden_database;"):
+            self.sql(query, phase="restricted account rejects unrelated administrative or write operation", admin=False, expected=1)
+        grants_check = (
+            "import subprocess; c=b.Config.from_env();\n"
+            "with b.client_options(c) as options:\n"
+            " r=subprocess.run(['mariadb','--defaults-file='+str(options),'--batch','--skip-column-names'],"
+            "input=b'SHOW GRANTS FOR CURRENT_USER;\\n',stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env=b.client_environment());\n"
+            " assert r.returncode==0; grants=r.stdout.decode(); "
+            "assert not any(p in grants for p in ['ALL PRIVILEGES','SUPER','CREATE USER','GRANT OPTION','RELOAD']); "
+            "assert 'SELECT, SHOW VIEW' in grants and 'TRIGGER' in grants and 'EVENT' in grants; "
+            "print('Restricted grants verified; account authentication data is not printed')"
+        )
+        self.worker_python(grants_check, phase="minimum dump grants verified without credential output")
+        self.check("dedicated account is idempotently provisioned and rejects unrelated administration/DML and wildcard schema access")
+        rotated = secrets.token_urlsafe(24) + "'\\literal"
+        self.redacted_values.append(rotated)
+        self.env["BACKUP_DB_PASSWORD"] = rotated
+        self.provision(phase="existing password preserved without rotation flag")
+        self.env["BACKUP_DB_PASSWORD"] = self.backup_password
+        self.sql("SELECT 1;", phase="original backup password still authenticates", admin=False)
+        self.env["BACKUP_DB_PASSWORD"] = rotated
+        self.provision("--rotate-password", phase="explicit dedicated account password rotation")
+        self.env["BACKUP_DB_PASSWORD"] = self.backup_password
+        self.sql("SELECT 1;", phase="old backup credential rejected after rotation", admin=False, expected=1)
+        self.env["BACKUP_DB_PASSWORD"] = rotated
+        env_text = self.environment_file.read_text().replace("BACKUP_DB_PASSWORD=" + self.backup_password + "\n",
+                                                            "BACKUP_DB_PASSWORD=" + rotated + "\n")
+        self.environment_file.write_text(env_text)
+        self.backup_password = rotated
+        self.sql("SELECT 1;", phase="rotated backup credential authenticates", admin=False)
+        self.check("password stays unchanged unless explicit rotation is requested")
         self.compose("up", "-d", "--wait", "--wait-timeout", "120", "db-backup", phase="scheduler initial backup and health")
         first = list(self.backups.glob("*.sql.gz"))
         assert len(first) >= 2 and self.historical in first
@@ -241,15 +317,45 @@ class BackupStackQA:
         count_before = len(list(self.backups.glob("*.sql.gz")))
         self.run([str(ROOT / "scripts/backup-production-db")], phase="non-transactional default refusal", expected=1)
         assert len(list(self.backups.glob("*.sql.gz"))) == count_before
+        self.provision("--allow-lock-all", phase="explicitly grant RELOAD for global read locks")
         self.compose("run", "--rm", "--no-deps", "-T", "--env", "BACKUP_NON_TRANSACTIONAL_POLICY=lock-all",
                      "db-backup", "backup", phase="explicit lock-all backup of isolated MyISAM fixture")
         self.sql("ALTER TABLE backup_nontransactional_probe ENGINE=InnoDB;\n", phase="return QA fixture to InnoDB")
+        self.provision(phase="remove optional global RELOAD after lock-all test")
         self.check("actual non-transactional engine refusal and explicitly selected lock-all dump")
         preview = self.compose("run", "--rm", "--no-deps", "-T", "db-backup", "inspect", phase="retention/capacity dry-run")
         events = [json.loads(line) for line in preview.stdout.splitlines() if line.startswith("{")]
         self.report["database_measurement"] = next(event for event in events if event["event"] == "database_inspected")
         self.report["retention_dry_run"] = next(event for event in events if event["event"] == "retention_plan")
         self.check("actual isolated schema engine, size, retention and capacity inspection")
+
+        capacity_code = (
+            "from datetime import timedelta; c=b.Config.from_env();\n"
+            "with b.directory_lock(c.directory):\n"
+            " source=next(p for p in c.directory.iterdir() if b.NAME_PATTERN.fullmatch(p.name)); data=source.read_bytes(); now=b.utc_now();\n"
+            " for i in range(55):\n"
+            "  stamp=now-timedelta(days=15,minutes=i*30); name='db-'+stamp.strftime('%Y%m%dT%H%M%SZ')+'-'+b.secrets.token_hex(6)+'.sql.gz'; "
+            "p=c.directory/name; p.write_bytes(data); (c.directory/(name+'.sha256')).write_text(b.hashlib.sha256(data).hexdigest()+'  '+name+'\\n');\n"
+            " plan=b.make_retention_plan(c,now=now);\n"
+            " with b.client_options(c) as options: engines=b.inspect_database(c,options)\n"
+            " points,_=b.scan_recovery_points(c.directory); estimate=max(2*sum(v['bytes'] for v in engines.values()),max(p.uncompressed_size for p in points));\n"
+            " print(b.json.dumps({'capacity_limit':b.storage_bytes(c.directory)+estimate-plan['estimated_bytes_freed']//2,'eligible_bytes':plan['estimated_bytes_freed']}))"
+        )
+        capacity = self.worker_python(capacity_code, phase="isolated eligible capacity-pressure fixtures")
+        sizing = json.loads(capacity.stdout.splitlines()[-1])
+        assert sizing["eligible_bytes"] > 0
+        before_capacity = {p.name for p in self.backups.glob("*.sql.gz")}
+        capacity_env = ("--env", "BACKUP_MAX_TOTAL_BYTES=" + str(sizing["capacity_limit"]))
+        dry = self.compose("run", "--rm", "--no-deps", "-T", *capacity_env,
+                           "--env", "BACKUP_RETENTION_MODE=dry-run", "db-backup", "backup",
+                           phase="capacity dry-run preserves all files", expected=1)
+        assert {p.name for p in self.backups.glob("*.sql.gz")} == before_capacity
+        assert '"reason": "capacity_pressure"' in dry.stdout
+        reclaimed = self.compose("run", "--rm", "--no-deps", "-T", *capacity_env, "db-backup", "backup",
+                                 phase="capacity-driven pre-retention permits new restricted-account dump")
+        assert '"reason": "capacity_pressure"' in reclaimed.stdout and '"event": "backup_completed"' in reclaimed.stdout
+        assert all(p.exists() for p in points) and self.historical.exists()
+        self.check("capacity pressure runs safe pre-retention only in apply; dry-run preserves all pairs")
 
         hold_code = (
             "import sys; sys.path.insert(0, '/opt/minikandoo'); import db_backup as b; "
@@ -300,7 +406,7 @@ class BackupStackQA:
         self.compose("up", "-d", "--wait", "--wait-timeout", "120", "db-backup", phase="QA service recovery after failure")
         self.check("unavailable database failure visible in Compose logs; backups survive recreation and recovery")
         logs = self.compose("logs", "--no-color", "db-backup", phase="normal Compose backup logs").stdout
-        assert '"event": "backup_completed"' in logs and self.password not in logs
+        assert '"event": "backup_completed"' in logs and self.password not in logs and self.backup_password not in logs
         assert hashlib.sha256(self.historical.read_bytes()).hexdigest() == self.historical_hash
         self.check("historical backup preserved and credentials absent from backup logs")
 
@@ -328,21 +434,23 @@ class BackupStackQA:
         restore_code = (
             "import subprocess, gzip; config=b.Config.from_env(); path=config.directory/" + repr(latest.name) + "; "
             "b.verify_backup_checksum(path); b.verify_gzip(path);\n"
-            "with b.client_options(config) as options, gzip.open(path,'rb') as stream:\n"
+            "with b.mariadb_client_options(config.database, 'root', os.environ['MARIADB_ROOT_PASSWORD'], config.host, config.port) as options, gzip.open(path,'rb') as stream:\n"
             " result=subprocess.run(['mariadb','--defaults-file='+str(options),config.database],input=stream.read(),"
             "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=b.client_environment()); sys.exit(result.returncode)\n"
         )
-        self.worker_python(restore_code, phase="SQL restore into isolated target", extra_env=restore_extra)
+        self.admin_python(restore_code, phase="SQL restore into isolated target", extra_env=restore_extra,
+                          mounts=("--volume", str(self.backups) + ":/backups:ro"))
         result = self.sql(
             "SELECT COUNT(*) FROM backup_restore_probe WHERE (id=1 AND value='synthetic first') OR (id=2 AND value='synthetic second');\n"
             "SELECT COUNT(*) FROM backup_trigger_probe;\n"
             "SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=DATABASE();\n"
             "SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE();\n"
             "SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA=DATABASE();\n"
-            "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('payments_payment','orders_order','products_productvariant');\n",
+            "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('payments_payment','orders_order','products_productvariant');\n"
+            "SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='qa_probe_view';\n",
             phase="restored row counts, routine, trigger, event and Django tables", extra_env=restore_extra,
         )
-        assert result.stdout.splitlines() == ["2", "2", "1", "1", "1", "3"]
+        assert result.stdout.splitlines() == ["2", "2", "1", "1", "1", "3", "1"]
         self.check("actual isolated SQL restore, row counts, routines, triggers, events and Django schema")
         self.report["backup_sizes_bytes"] = [path.stat().st_size for path in points]
         self.report["production_deployed"] = False

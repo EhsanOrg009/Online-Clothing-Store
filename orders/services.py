@@ -333,6 +333,9 @@ def expire_due_orders() -> int:
         try:
             with transaction.atomic():
                 order = Order.objects.select_for_update().get(pk=order.pk)
+                if order.payments.filter(status=PaymentStatus.MANUAL_REVIEW).exists():
+                    logger.warning("Order %s retains inventory: payment requires manual review", order.order_number)
+                    continue
                 if (
                     order.status not in (OrderStatus.PENDING_PAYMENT, OrderStatus.PAYMENT_FAILED)
                     or order.is_paid or order.inventory_released or not order.is_expired

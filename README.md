@@ -60,8 +60,8 @@ React, Next.js, and Node.js are not used to serve the application at runtime. No
 4. The order service locks the relevant inventory rows and updates stock inside a database transaction to prevent concurrent purchases from overselling available items.
 5. The order stores a snapshot of the product name, selected variant, price, and shipping address as they were at checkout.
 6. The customer is redirected to the configured payment gateway. The application does not trust query parameters alone; payment status must be verified server-side.
-7. Payment callbacks are processed idempotently so repeated callbacks do not repeat payment processing or deduct inventory again.
-8. Unpaid orders can expire after the configured reservation period. The expiration command cancels eligible orders and releases their reserved stock.
+7. Payment verification runs before acquiring database row locks. Its result is then applied atomically to the current order and payment state; duplicate callbacks do not repeat fulfillment or inventory operations.
+8. An unresolved successful receipt in manual review blocks another receipt from automatically paying the order. Its reserved stock stays held until review is resolved; other eligible unpaid orders continue to expire normally.
 9. Administrators manage catalog data, discounts, customers, transactions, and order-status transitions through Django's administration interface.
 
 ---
@@ -250,11 +250,20 @@ MiniKandoo production uses the base and production Compose files through `script
 
 ```bash
 scripts/compose-production config --quiet
-scripts/compose-production build web db-backup
+scripts/compose-production build web
+scripts/compose-production --profile backup-admin build db-backup db-backup-provision
 scripts/compose-production ps
 ```
 
-For an existing server, take and verify a fresh backup, pause writers in the approved maintenance window and apply the reviewed migration plan before starting the new web and backup services. The [deployment guide](docs/deployment-production-fa.md) distinguishes this sequence from initializing a fresh database.
+Before starting the backup worker or taking a manual backup with the new image, configure its separate database account and explicitly provision it against the healthy database:
+
+```bash
+scripts/compose-production --profile backup-admin run --rm -T db-backup-provision
+```
+
+The long-running worker receives only `BACKUP_DB_USER` and `BACKUP_DB_PASSWORD`. Root credentials are confined to the short-lived provisioning service. For an existing server, verify a fresh backup, pause writers in the approved maintenance window and review the migration plan before starting updated services. The [deployment guide](docs/deployment-production-fa.md) distinguishes this sequence from initializing a fresh database; these commands require a separately approved production deployment.
+
+Backups run inside the same Compose project on UTC half-hour boundaries, with an initial backup after startup. Retention defaults to a preview. When explicitly set to `apply`, it can remove eligible old managed pairs before a capacity-blocked dump while preserving the required recent and daily recovery points. See [backup operations](docs/production-database-backups.md) for capacity, verification, provisioning and restore procedures.
 
 Important production settings include:
 
@@ -267,6 +276,8 @@ Important production settings include:
 | `ZIBAL_PAID_AT_TIMEZONE` | Empty until officially confirmed | IANA timezone for gateway timestamps without an offset |
 | `SITE_URL` | Storefront origin; HTTPS in production | Builds the payment callback URL |
 | `DATABASE_PASSWORD` | Required, strong password | Database authentication |
+| `BACKUP_DB_USER` | Required, separate backup account | Restricted MariaDB dump user |
+| `BACKUP_DB_PASSWORD` | Required, strong independent password | Backup account authentication; no root fallback |
 | `ALLOWED_HOSTS` | Your real domain | Allowed host names |
 | `CSRF_TRUSTED_ORIGINS` | Full origins, including `https://` | CSRF protection behind the domain |
 | `SECURE_SSL_REDIRECT` | `True` when HTTPS is configured | Redirects HTTP requests to HTTPS |

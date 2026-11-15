@@ -379,6 +379,42 @@ class OrderLifecycleTests(OrderFixtureMixin, TestCase):
         self.assertEqual(Order.objects.for_customer(self.customer).count(), 1)
 
 
+    def test_manual_receipts_hold_expired_reservation_until_resolved(self):
+        from payments.models import Payment
+        Order.objects.filter(pk=self.order.pk).update(expires_at=timezone.now() - timedelta(minutes=1))
+        receipt = Payment.objects.create(order=self.order, gateway="zibal", authority="manual-stock-hold",
+                                         amount=self.order.total, status=PaymentStatus.MANUAL_REVIEW)
+        Payment.objects.create(order=self.order, gateway="zibal", authority="second-manual-stock-hold",
+                               amount=self.order.total, status=PaymentStatus.MANUAL_REVIEW)
+        self.assertFalse(Order.objects.due_for_expiry().filter(pk=self.order.pk).exists())
+        self.assertEqual(expire_due_orders(), 0)
+        self.order.refresh_from_db()
+        self.variant.refresh_from_db()
+        self.assertFalse(self.order.inventory_released)
+        self.assertEqual(self.variant.stock, 3)
+        # Simulate the final non-fulfillable receipts established by controlled recovery.
+        self.order.payments.update(status=PaymentStatus.SUCCESSFUL, needs_refund=True)
+        self.assertEqual(Order.objects.due_for_expiry().filter(pk=self.order.pk).count(), 1)
+        self.assertEqual(expire_due_orders(), 1)
+        self.order.refresh_from_db()
+        self.assertTrue(self.order.inventory_released)
+
+    def test_locked_expiry_rechecks_manual_receipt_after_candidate_selection(self):
+        from payments.models import Payment
+        from unittest.mock import patch
+        Order.objects.filter(pk=self.order.pk).update(expires_at=timezone.now() - timedelta(minutes=1))
+        Payment.objects.create(order=self.order, gateway="zibal", authority="manual-stale-candidate",
+                               amount=self.order.total, status=PaymentStatus.MANUAL_REVIEW)
+        with patch.object(Order.objects, "due_for_expiry", return_value=[self.order]):
+            with self.assertLogs("orders.services", level="WARNING") as logs:
+                self.assertEqual(expire_due_orders(), 0)
+        self.assertIn(self.order.order_number, logs.output[0])
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.PENDING_PAYMENT)
+        self.assertEqual(self.order.payment_status, PaymentStatus.PENDING)
+        self.assertFalse(self.order.inventory_released)
+
+
 class ShippingTests(OrderFixtureMixin, TestCase):
     def test_single_standard_option(self):
         options = get_shipping_options()
@@ -427,6 +463,19 @@ class OrderAdminTests(OrderFixtureMixin, TestCase):
         staff.save(update_fields=["is_staff", "is_superuser"])
         request.user = staff
         return request
+
+    def test_manual_receipt_count_is_annotated_and_read_only(self):
+        from django.contrib.admin import AdminSite
+        from orders.admin import OrderAdmin
+        from payments.models import Payment
+        admin_instance = OrderAdmin(Order, AdminSite())
+        for authority in ("admin-manual-one", "admin-manual-two"):
+            Payment.objects.create(order=self.order, authority=authority, gateway="zibal",
+                                   amount=self.order.total, status=PaymentStatus.MANUAL_REVIEW)
+        obj = admin_instance.get_queryset(self._admin_request()).get(pk=self.order.pk)
+        self.assertEqual(admin_instance.manual_review_receipts(obj), 2)
+        self.assertIn("manual_review_receipts", admin_instance.readonly_fields)
+        self.assertIn("payment_status", admin_instance.readonly_fields)
 
     def test_save_model_preserves_other_fields_on_status_change(self):
         from django.contrib.admin.sites import AdminSite

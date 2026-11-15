@@ -23,6 +23,7 @@ chmod 600 .env.production
 openssl rand -base64 48  # یک بار برای SECRET_KEY
 openssl rand -base64 32  # برای DATABASE_PASSWORD
 openssl rand -base64 32  # مقدار جداگانه برای MARIADB_ROOT_PASSWORD
+openssl rand -base64 32  # مقدار مستقل برای BACKUP_DB_PASSWORD
 nano .env.production
 ```
 
@@ -31,6 +32,8 @@ nano .env.production
 درگاه پرداخت زیبال پیاده‌سازی شده است. `PAYMENT_GATEWAY=zibal` و `ZIBAL_MERCHANT` واقعی پنل زیبال را تنظیم کنید؛ `SITE_URL=https://minikandoo.ir` باید با دامنه ثبت‌شده درگاه مرتبط باشد و IP خروجی VPS، در صورت فعال بودن محدودیت IP، در پنل مجاز باشد. حساب تست `zibal` در Production رد می‌شود. اتصال HTTPS خروجی به `gateway.zibal.ir` لازم است. [جزئیات چرخه پرداخت و بازیابی](zibal-payment.md) را ببینید. برای `SMS_PROVIDER` همچنان adapter و کلید واقعی لازم است؛ `console` پیامک واقعی ارسال نمی‌کند.
 
 `ZIBAL_PAID_AT_TIMEZONE` تا تأیید کتبی نام IANA از زیبال خالی می‌ماند؛ زمان‌های بدون offset بررسی دستی می‌شوند. `BACKUP_HOST_DIR` پیش‌فرض `/root/minikandoo-backups` باید موجود و با UID/GID سرویس سازگار باشد. قبل از روشن‌کردن deletion، retention dry-run و engine/ظرفیت واقعی را طبق سند بکاپ بازبینی کنید. بکاپ تاریخی `db-20261114-190647.sql.gz` خارج از الگوی حذف سرویس است.
+
+حساب مستقل `BACKUP_DB_USER` و `BACKUP_DB_PASSWORD` الزامی است؛ worker طولانی‌عمر root password نمی‌گیرد. روی سرور موجود فقط کلیدهای جدید را به محیط خصوصی اضافه کنید. provisioning در مرحلهٔ بعد صریح است؛ init scriptهای DB روی volume موجود دوباره اجرا نمی‌شوند.
 
 ## 3. صدور اولیه TLS
 
@@ -63,7 +66,8 @@ scripts/compose-production --bootstrap stop nginx
 ```sh
 scripts/compose-production config --quiet
 scripts/compose-production --bootstrap config --quiet
-scripts/compose-production build web db-backup
+scripts/compose-production build web
+scripts/compose-production --profile backup-admin build db-backup db-backup-provision
 ```
 
 فقط در **نصب تازه**، پیش از migration دیتابیس و Redis را راه‌اندازی کنید. دیتابیس خالی هنوز recovery point معنادار ندارد؛ نخستین بکاپ scheduler پس از ایجاد schema گرفته می‌شود:
@@ -71,6 +75,14 @@ scripts/compose-production build web db-backup
 ```sh
 scripts/compose-production up -d --wait db redis
 ```
+
+برای هر دو حالت نصب تازه و به‌روزرسانی، قبل از manual backup یا شروع worker جدید، حساب بکاپ را با DB سالم و مجوز استقرار صریح provision کنید:
+
+```sh
+scripts/compose-production --profile backup-admin run --rm -T db-backup-provision
+```
+
+این سرویس کوتاه‌عمر فقط حساب جداگانه را می‌سازد و grants حداقلی dump را تنظیم می‌کند؛ رمز حساب موجود فقط با `--rotate-password` تغییر می‌کند. failure را پیش از ادامه رفع کنید. دستورهای rotation و grants اختیاری non-InnoDB در [سند بکاپ](production-database-backups.md) هستند؛ به worker دسترسی root یا ALL PRIVILEGES ندهید.
 
 در **به‌روزرسانی سرور موجود**، DB را recreate نکنید. از schema فعلی بکاپ دستی بگیرید، completion و SHA256/gzip را طبق سند بکاپ بررسی کنید، سپس در maintenance window وب، scheduler بکاپ و سایر نویسنده‌های سفارش را متوقف کنید. اگر backup با exit غیرصفر تمام شد، به migration نروید:
 
@@ -141,7 +153,7 @@ scripts/compose-production logs --tail=100 db-backup
 - لاگ‌ها از stdout/stderr جمع‌آوری و با محدودیت اندازه چرخانده می‌شوند. دیسک، وضعیت volumeها، TLS expiration، error rate و `/readyz/` را مانیتور کنید.
 - نسخه‌های imageها را در چرخه نگهداری به‌روز و پس از تغییر dependency/Dockerfile build و تست کنید.
 
-بکاپ اولیه پس از startup و سپس در مرزهای ۰۰/۳۰ دقیقهٔ UTC اجرا می‌شود. bind mount از recreate کانتینر محفوظ است. در حالت `apply`، recent 48 و daily 7 با هم‌پوشانی نگهداری و فقط نام‌های managed پاک می‌شوند؛ پیش‌فرض dry-run تا بازبینی اولیه هیچ حذف واقعی ندارد. checksum sidecar، gzip و restore آزمایشی معیارهای جداگانه‌اند. [راهنمای کامل](production-database-backups.md) دستورهای verification، محدودیت ظرفیت، restore با تأیید انسانی و عیب‌یابی health را دارد.
+بکاپ اولیه پس از startup و سپس در مرزهای ۰۰/۳۰ دقیقهٔ UTC اجرا می‌شود. bind mount از recreate کانتینر محفوظ است. در حالت `apply`، recent 48 و daily 7 با هم‌پوشانی نگهداری و فقط نام‌های managed پاک می‌شوند؛ در فشار ظرفیت، eligible pairها پیش از dump قابل حذف‌اند و سپس ظرفیت دوباره بررسی می‌شود. مجموعهٔ protected هرگز برای ساخت dump تازه پایین آورده نمی‌شود. پیش‌فرض dry-run تا بازبینی اولیه هیچ حذف واقعی ندارد. checksum sidecar، gzip و restore آزمایشی معیارهای جداگانه‌اند. [راهنمای کامل](production-database-backups.md) دستورهای verification، محدودیت ظرفیت، restore با تأیید انسانی و عیب‌یابی health را دارد.
 
 ## مرزهای موجود
 

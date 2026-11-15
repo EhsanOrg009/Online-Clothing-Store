@@ -302,7 +302,7 @@ pending_payment ──► paid ──► preparing ──► ready_to_ship ─�
 uv run python manage.py expire_pending_orders
 ```
 
-این دستور باید دوره‌ای از روند عملیاتی موجود اجرا شود؛ در production از `scripts/compose-production exec -T web python manage.py expire_pending_orders` استفاده می‌شود. انقضا پس از گرفتن قفل سفارش، paid بودن و آزادسازی رزرو را دوباره بررسی می‌کند. callbackی که واقعاً درون مهلت پرداخت شده است می‌تواند دیر برسد و سفارش فعال را بپردازد؛ پس از آزادسازی موجودی، سفارش احیا نمی‌شود.
+این دستور باید دوره‌ای از روند عملیاتی موجود اجرا شود؛ در production از `scripts/compose-production exec -T web python manage.py expire_pending_orders` استفاده می‌شود. انقضا پس از گرفتن قفل سفارش، paid بودن، آزادسازی رزرو و وجود receipt در `MANUAL_REVIEW` را دوباره بررسی می‌کند. چنین رسیدی رزرو را تا بررسی پشتیبانی نگه می‌دارد و اجازهٔ fulfillment نیست. callbackی که واقعاً درون مهلت پرداخت شده است می‌تواند دیر برسد و سفارش فعال را بپردازد؛ پس از آزادسازی موجودی، سفارش احیا نمی‌شود.
 
 ---
 
@@ -415,14 +415,15 @@ payments/gateways/
    ├─ اعتبارسنجی Query: trackId / success / status / orderId
    ├─ یافتن Payment زیبال با trackId و تطبیق orderId
    └─ process_callback(payment, callback_data)
-        ├─ قفل سفارش و سپس Payment؛ افزایش callback_count
-        ├─ ⛔ Idempotency: SUCCESSFUL تکراری اعمال نمی‌شود؛ CANCELLED با موفقیت واقعی قابل بررسی دوباره است
-        ├─ gateway.verify_payment()      ★ تأیید سمت سرور
+        ├─ snapshot حداقلی و اعتبارسنجی شناسه‌های callback
+        ├─ gateway.verify_payment() بیرون تراکنش و قفل ردیفی
         │    ├─ POST /v1/verify؛ برای 201/202 استعلام /v1/inquiry
         │    └─ تطبیق status=1، مبلغ ریالی، orderId و شماره مرجع
-        ├─ تفسیر paidAt و مقایسهٔ مستقل از زمان ورود callback
-        ├─ زمان مبهم/آینده/رزرو نامعتبر → MANUAL_REVIEW
-        └─ mark_order_paid فقط برای رزرو سالم و پرداخت در مهلت؛ وجه late/اضافه معتبر → needs_refund
+        └─ تراکنش کوتاه: قفل Order سپس Payment و خواندن وضعیت تازه
+             ├─ callback_count و idempotency؛ رسید نهایی بازنویسی نمی‌شود
+             ├─ تطبیق دوبارهٔ هویت، primary، رسید دستی دیگر و timestamp
+             ├─ زمان مبهم/آینده/receipt حل‌نشدهٔ دیگر → MANUAL_REVIEW
+             └─ mark_order_paid فقط برای رزرو سالم و پرداخت در مهلت؛ وجه late/اضافه معتبر → needs_refund
 ```
 
 ### سه لایه‌ی دفاعی
@@ -439,7 +440,7 @@ payments/gateways/
 
 `PAYMENT_GATEWAY=zibal` و `ZIBAL_MERCHANT` از محیط خوانده می‌شوند؛ `SITE_URL` برای ساخت Callback استفاده می‌شود. تومان در دیتابیس باقی می‌ماند و تبدیل ریال فقط در adapter انجام می‌شود. جزئیات در [راهنمای پرداخت زیبال](docs/zibal-payment.md).
 
-`ZIBAL_PAID_AT_TIMEZONE` پیش‌فرض خالی دارد؛ نمونه‌های رسمی بدون offset، timezone را مشخص نمی‌کنند. تنظیم `TIME_ZONE` Django یا timezone سرور برای آن‌ها فرض نمی‌شود. raw `paidAt` حفظ و receipt مبهم بدون fulfillment/refund خودکار در manual review ثبت می‌شود. `Payment.gateway_paid_at` جدا از زمان‌های محلی است. callback با ترتیب `Order → Payment → ProductVariant` و انقضا با `Order → ProductVariant`، واریانت‌ها به ترتیب PK، سریالی می‌شوند. [ابزار recovery](docs/zibal-verification-recovery.md) پیش‌فرض Inquiry خواندنی دارد و apply نیازمند بکاپ تازه با SHA256 sidecar منطبق است.
+`ZIBAL_PAID_AT_TIMEZONE` پیش‌فرض خالی دارد؛ نمونه‌های رسمی بدون offset، timezone را مشخص نمی‌کنند. تنظیم `TIME_ZONE` Django یا timezone سرور برای آن‌ها فرض نمی‌شود. raw `paidAt` حفظ و receipt مبهم بدون fulfillment/refund خودکار در manual review ثبت می‌شود. `Payment.gateway_paid_at` جدا از زمان‌های محلی است. callback با ترتیب `Order → Payment → ProductVariant` و انقضا با `Order → ProductVariant`، واریانت‌ها به ترتیب PK، سریالی می‌شوند. HTTP قبل از این قفل‌ها انجام می‌شود. [ابزار recovery](docs/zibal-verification-recovery.md) کل تاریخچهٔ پرداخت را بررسی می‌کند؛ مجوز محدود به primary یکتا، Inquiry کامل، تاریخچهٔ بدون ابهام و بکاپ تازه با SHA256 sidecar منطبق وابسته است. تغییر history حین Verify این مجوز را نامعتبر می‌کند.
 
 ---
 
@@ -658,11 +659,11 @@ PYTHONPATH=scripts/qa .venv/bin/python manage.py test --settings=shop_test_setti
 .venv/bin/python scripts/qa/test_backup_stack.py
 ```
 
-suite شامل common، accounts، products، cart، orders، payments و store است. تست‌های پرداخت از HTTP شبیه‌سازی‌شده استفاده می‌کنند. پنج تست قفل ردیفی روی SQLite skip و روی MariaDB اجرا می‌شوند؛ callback-first و expiry-first نیز با threadهای واقعی و قفل DB بررسی می‌شوند. forward/backward migration، زمان‌های دارای offset/بدون offset/DST/future، referenceهای رشته‌ای/نامعتبر، duplicate payment، recovery retry و موجودی پوشش دارند.
+suite شامل common، accounts، products، cart، orders، payments و store است. تست‌های پرداخت از HTTP شبیه‌سازی‌شده استفاده می‌کنند. تست‌های قفل ردیفی روی SQLite skip و روی MariaDB اجرا می‌شوند؛ HTTP کند بدون نگهداری قفل، callback-first، expiry-first و رسید دستی هم‌زمان با threadهای واقعی بررسی می‌شوند. forward/backward migration، زمان‌های دارای offset/بدون offset/DST/future، referenceهای رشته‌ای/نامعتبر، duplicate payment، recovery retry و موجودی پوشش دارند.
 
 worker بکاپ با client مصنوعی و پوشه‌های موقت، dump/gzip/checksum failure، atomic publication، locks، recent/daily overlap، legacy preservation، partial cleanup، dry-run و ظرفیت را بررسی می‌کند. driver Docker image را واقعاً build و روی project یکتا، manual/scheduler، lock بین کانتینرها، restart و failure recovery و SQL restore واقعی به target موقت را می‌آزماید. هیچ volume موجود حذف نمی‌شود. CI همین suite SQLite و Docker/MariaDB را اجرا می‌کند؛ موفقیت CI باید از نتیجهٔ runner خوانده شود.
 
-شمارش و نتیجهٔ واقعی اجرای نهایی در [گزارش بازیابی](docs/zibal-verification-recovery.md) ثبت شده است. suite محلی یا restore مصنوعی به معنی فعال‌بودن production backup یا بازیابی سه تراکنش واقعی نیست.
+شمارش و نتیجهٔ واقعی اجرای نهایی در گزارش تحویل ثبت می‌شود. suite محلی یا restore مصنوعی به معنی فعال‌بودن production backup یا بازیابی سه تراکنش واقعی نیست.
 
 ---
 
@@ -707,9 +708,9 @@ Stage 3  runtime │ python:3.14-slim      │ فقط venv + runtime deps   → 
 
 ### بکاپ مستقل از وب
 
-`docker/backup/Dockerfile` از image رسمی MariaDB با digest ثابت، فقط client و worker استاندارد Python را اجرا می‌کند. `db-backup` به `db` healthy وابسته است؛ server یا database تازه نمی‌سازد. restart policy، بدون ports/socket/capabilities، rootfs خواندنی و `/tmp` محدود دارد. bind mount پیش‌فرض `/root/minikandoo-backups` فایل‌ها را از recreate کانتینر حفظ می‌کند.
+`docker/backup/Dockerfile` از image رسمی MariaDB با digest ثابت، فقط client و worker استاندارد Python را اجرا می‌کند. `db-backup` به `db` healthy وابسته است؛ server یا database تازه نمی‌سازد. حساب جداگانهٔ `BACKUP_DB_USER`/`BACKUP_DB_PASSWORD` استفاده می‌شود؛ root credential فقط در سرویس کوتاه‌عمر `db-backup-provision` و profile صریح `backup-admin` است. restart policy، بدون ports/socket/capabilities، rootfs خواندنی و `/tmp` محدود دارد. bind mount پیش‌فرض `/root/minikandoo-backups` فایل‌ها را از recreate کانتینر حفظ می‌کند.
 
-initial backup و مرزهای ۰۰/۳۰ دقیقهٔ UTC با loop داخلی اجرا می‌شوند؛ failure به tick بعد می‌رود. flock مشترک تمام manual/scheduled/retention عملیات را سریالی می‌کند. engineهای schema قبل از dump خوانده می‌شوند؛ non-InnoDB با سیاست پیش‌فرض رد می‌شود. gzip، SHA256 sidecar و publication بدون overwrite لازم‌اند. recent 48 + daily 7 با overlap، حفاظت newest/previous و تمام legacy/unrelated فایل‌ها اجرا می‌شود؛ dry-run قبل از فعال‌سازی حذف لازم است. ظرفیت از اندازه‌گیری واقعی و limits قابل تنظیم بررسی می‌شود. [راهنمای عملیات و restore](docs/production-database-backups.md) جزئیات و محدودیت same-host را دارد.
+initial backup و مرزهای ۰۰/۳۰ دقیقهٔ UTC با loop داخلی اجرا می‌شوند؛ failure به tick بعد می‌رود. flock مشترک تمام manual/scheduled/retention عملیات را سریالی می‌کند. engineهای schema قبل از dump خوانده می‌شوند؛ non-InnoDB با سیاست پیش‌فرض رد می‌شود. اسکن integrity، SHA256 bytes فشرده و gzip/CRC را با یک خواندن streaming بررسی می‌کند. publication بدون overwrite لازم است. recent 48 + daily 7 با overlap، حفاظت newest/previous و تمام legacy/unrelated فایل‌ها اجرا می‌شود؛ dry-run قبل از فعال‌سازی حذف لازم است. تنها در فشار ظرفیت و حالت apply، eligible pairها پیش از dump زیر همان lock حذف و ظرفیت دوباره بررسی می‌شود؛ مجموعهٔ محافظت‌شده برای backup جدید قربانی نمی‌شود. [راهنمای عملیات و restore](docs/production-database-backups.md) جزئیات مجوزها، provisioning و محدودیت same-host را دارد.
 
 ---
 
