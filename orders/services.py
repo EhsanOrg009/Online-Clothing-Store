@@ -216,7 +216,7 @@ def mark_order_paid(order: Order, paid_at=None) -> Order:
     # دفاع نهایی: سفارش لغو/منقضی‌شده نباید «پرداخت‌شده» شود. اگر پول در درگاه
     # گرفته شده، فراخواننده (process_callback) این استثنا را گرفته و تراکنش را
     # برای بازگشت وجه علامت می‌زند؛ وضعیت سفارش دست‌نخورده می‌ماند.
-    if order.status == OrderStatus.CANCELLED:
+    if order.status == OrderStatus.CANCELLED or order.is_expired:
         raise OrderNotPayable(
             _("سفارش لغو یا منقضی‌شده قابل علامت‌گذاری به‌عنوان پرداخت‌شده نیست.")
         )

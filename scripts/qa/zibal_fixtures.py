@@ -51,7 +51,7 @@ def api_response(gateway, path, payload):
         raise AssertionError(f"Unexpected Zibal operation: {path}")
     return {
         "result": 100, "status": status, "amount": int(payment.amount) * 10,
-        "orderId": payment.order.order_number, "refNumber": int(payment.authority) + 1,
+        "orderId": payment.order.order_number, "refNumber": str(int(payment.authority) + 1),
         "paidAt": timezone.now().isoformat(),
     }
 

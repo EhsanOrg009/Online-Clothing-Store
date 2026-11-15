@@ -34,3 +34,9 @@ Thumbs.db
 
 # ---------- Docker ----------
 docker-compose.override.yml
+
+# ---------- Private database backups and payment recovery reports ----------
+*.sql.gz
+*.sql.gz.*
+minikandoo-backups/
+zibal-recovery-*.json

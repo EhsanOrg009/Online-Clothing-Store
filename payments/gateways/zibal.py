@@ -186,7 +186,16 @@ class ZibalGateway(PaymentGateway):
         if self._check_details(payment, data) != 1:
             raise PaymentGatewayError("زیبال پرداخت تأییدشده‌ای برای این تراکنش گزارش نکرد.")
         reference = data.get("refNumber")
-        if type(reference) is not int or reference <= 0 or len(str(reference)) > 64:
+        if type(reference) is int and 0 < reference < 10**64:
+            reference_id = str(reference)
+        elif (
+            isinstance(reference, str)
+            and re.fullmatch(r"[0-9]{1,64}", reference)
+            and int(reference) > 0
+        ):
+            # Preserve the gateway's representation, including leading zeros.
+            reference_id = reference
+        else:
             raise PaymentGatewayError("شماره مرجع گزارش زیبال نامعتبر است.")
         try:
             paid_at = parse_datetime(data.get("paidAt", ""))
@@ -198,7 +207,7 @@ class ZibalGateway(PaymentGateway):
             successful=True,
             status=PaymentStatus.SUCCESSFUL,
             transaction_id=payment.authority,
-            reference_id=str(reference),
+            reference_id=reference_id,
             message="پرداخت با موفقیت تأیید شد.",
             raw=self._audit_data(data, verify_result),
         )
