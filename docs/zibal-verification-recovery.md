@@ -62,6 +62,23 @@ raw timestamp خراب که احتمالاً متن دلخواه یا object ب�
 
 HTTP خارج از تراکنشِ قفل‌دار است. اگر انقضا هنگام انتظار برای Verify زودتر commit کند، receipt بعدی سفارش را احیا نمی‌کند. اگر application معتبر callback اول commit کند، انقضا paid بودن را دوباره بررسی می‌کند. receipt دستی که پس از انتخاب candidate انقضا ثبت شده نیز با check دومِ زیر قفل از آزادسازی موجودی محافظت می‌شود.
 
+## اتصال تلاش ایجادِ نامطمئن به شناسهٔ زیبال
+
+تلاش ایجادِ `requesting`، `uncertain` یا `review` و تلاش بدون شناسهٔ معتبر در `unresolved_creation_requests` جداگانه گزارش می‌شود و primary تازه را مسدود می‌کند. UUID و وضعیت ایجاد در fingerprint کل history هستند؛ تلاش تازه هنگام Inquiry/Verify مجوز قدیمی را نامعتبر می‌کند. درخواست دارای رد مستند و بدون track ID، رسید موفق شمرده نمی‌شود و تاریخچهٔ رد آن حفظ می‌شود.
+
+ابتدا UUID را از Payment Admin و track ID را از گزارش مستقل زیبال دریافت کنید. زیبال Inquiry با UUID محلی یا idempotency درخواست ایجاد را مستند نکرده است؛ اگر track ID قابل‌اعتبارسنجی ندارید، پرونده نیازمند پشتیبانی زیبال است و درخواست دوبارهٔ خودکار مجاز نیست.
+
+حالت خواندنی، با دقیقاً یک track ID و UUID همان سفارش:
+
+```sh
+scripts/compose-production exec -T web python manage.py reconcile_zibal_payments \
+  --order-number ORDER_NUMBER --track-id ZIBAL_TRACK_ID --request-id LOCAL_REQUEST_UUID
+```
+
+`--request-id` یک حالت اتصال شواهد است؛ primary انتخاب و سفارش fulfill نمی‌شود. Inquiry مبلغ، شمارهٔ سفارش و track ID را اعتبارسنجی می‌کند. مسیر apply همان backup تازه، sidecar و lock را لازم دارد؛ از دستور apply همین runbook با `--request-id LOCAL_REQUEST_UUID` و دقیقاً یک track ID استفاده کنید. Verify خارج قفل انجام و اتصال فقط روی وضعیت تازهٔ قفل‌شده ثبت می‌شود. شناسهٔ متعلق به تلاش دیگر بازنویسی نمی‌شود. برنامهٔ اتصال و SHA بکاپ در `creation_resolution_plan` و `recovery_history` ثبت می‌شوند.
+
+وجه تأییدشدهٔ سفارش هنوز unpaid، پس از این مرحله در manual review می‌ماند و `needs_refund=False` است؛ timestamp مبهم به refund تبدیل نمی‌شود. اگر سفارش قبلاً لغو یا با رسید معتبر دیگری paid شده باشد، قواعد موجود برای receipt معتبر همچنان اعمال می‌شوند. پس از اتصال، inspect عادی را **بدون `--request-id`** با تمام track IDهای سفارش اجرا کنید؛ تنها preflight کامل و primary یکتا می‌تواند مجوز محدود fulfillment صادر کند. رسید تازهٔ متصل‌شده اگر از انتخاب عادی حذف شود، primary را همچنان مسدود می‌کند.
+
 ## الزام بکاپ برای apply
 
 `--apply` بدون `--backup` متوقف می‌شود. بکاپ باید:
@@ -118,11 +135,12 @@ scripts/compose-production logs --tail=100 db-backup
 scripts/compose-production exec -T web python manage.py check --deploy
 ```
 
-توقف کنترل‌شدهٔ نویسنده‌ها و reload Nginx باید متناسب با آرایش واقعی سرور بازبینی شوند. `up` عمومی در استقرار معمول سرویس بکاپ را هم شامل می‌شود؛ نیازی به project یا دیتابیس مستقل نیست. این دو migration لازم‌اند:
+توقف کنترل‌شدهٔ نویسنده‌ها و reload Nginx باید متناسب با آرایش واقعی سرور بازبینی شوند. `up` عمومی در استقرار معمول سرویس بکاپ را هم شامل می‌شود؛ نیازی به project یا دیتابیس مستقل نیست. این migrationها لازم‌اند؛ روی parent `dcd8d9e` فقط `payments/0004` تازه است:
 
 ```text
 orders/0002_order_inventory_released_alter_order_payment_status
 payments/0003_payment_gateway_paid_at_alter_payment_needs_refund_and_more
+payments/0004_payment_creation_status_payment_request_id_and_more
 ```
 
 ## اجرای apply بررسی‌شده

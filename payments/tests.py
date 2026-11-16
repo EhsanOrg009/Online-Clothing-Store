@@ -16,8 +16,9 @@ from threading import Barrier, Event
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
+from uuid import uuid4
 
-from django.db import close_old_connections, connection
+from django.db import close_old_connections, connection, transaction
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import (
@@ -34,7 +35,7 @@ from orders.models import Order
 from orders.services import create_order, mark_order_paid
 from payments.gateways import ZibalGateway, get_gateway
 from payments.gateways.base import PaymentGatewayError
-from payments.models import Payment
+from payments.models import Payment, PaymentCreationStatus
 from payments.services import (
     PaymentError, create_payment_for_order, expire_stale_payments, process_callback,
 )
@@ -156,6 +157,19 @@ class PaymentFixtureMixin:
     def start_payment(self):
         return create_payment_for_order(self.order)
 
+    def historical_payment(self):
+        """Explicit historical attempts, including duplicates created by old code.
+
+        New submissions reuse a pending attempt; receipt-safety tests must still
+        exercise distinct gateway transactions rather than that deduplication.
+        """
+        gateway = get_gateway()
+        result = gateway.create_payment(self.order)
+        return Payment.objects.create(
+            order=self.order, gateway=gateway.name, amount=self.order.total,
+            authority=result.authority, metadata={"redirect_url": result.redirect_url},
+        )
+
 
 class GatewayTests(PaymentTestCase):
     def test_registry_returns_zibal(self):
@@ -212,7 +226,9 @@ class CreatePaymentTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertIs(type(payload["amount"]), int)
         self.assertEqual(payload["orderId"], self.order.order_number)
         self.assertEqual(payload["mobile"], self.customer.phone_number)
-        self.assertEqual(payload["callbackUrl"], "https://minikandoo.example/payments/callback/")
+        self.assertEqual(payload["callbackUrl"], "https://minikandoo.example" + reverse(
+            "payments:callback_request", kwargs={"request_id": payment.request_id},
+        ))
         self.assertEqual(payment.gateway, "zibal")
         self.assertEqual(payment.amount, self.order.total)
         self.assertEqual(payment.order_id, self.order.pk)
@@ -230,12 +246,16 @@ class CreatePaymentTests(PaymentFixtureMixin, PaymentTestCase):
         payload = json.loads(self.http.call_args.args[0].data)
         self.assertEqual(payment.amount, self.order.total)
         self.assertEqual(payload["amount"], int(self.order.total) * 10)
-        self.assertEqual(payload["callbackUrl"], "https://minikandoo.example/payments/callback/")
+        self.assertEqual(payload["callbackUrl"], "https://minikandoo.example" + reverse(
+            "payments:callback_request", kwargs={"request_id": payment.request_id},
+        ))
 
     def test_development_callback_can_use_configured_http_origin(self):
         with override_settings(SITE_URL="http://localhost:8765"):
-            self.start_payment()
-        self.assertEqual(json.loads(self.http.call_args.args[0].data)["callbackUrl"], "http://localhost:8765/payments/callback/")
+            payment = self.start_payment()
+        self.assertEqual(json.loads(self.http.call_args.args[0].data)["callbackUrl"], "http://localhost:8765" + reverse(
+            "payments:callback_request", kwargs={"request_id": payment.request_id},
+        ))
 
     def test_production_request_requires_https_callback(self):
         with override_settings(DEBUG=False, ZIBAL_MERCHANT="unit-test-merchant", SITE_URL="http://minikandoo.example"):
@@ -264,32 +284,38 @@ class CreatePaymentTests(PaymentFixtureMixin, PaymentTestCase):
 
     def test_api_request_errors_leave_order_unpaid(self):
         for code in (102, 103, 104, 105, 106, 112, 113, 115, 140, 999):
-            with self.subTest(code=code):
+            with self.subTest(code=code), transaction.atomic():
                 self.http.side_effect = None
                 self.http.return_value = self.http_response({"result": code, "message": "sensitive remote text"})
                 with self.assertRaises(PaymentError):
                     self.start_payment()
-                self.assertEqual(Payment.objects.count(), 0)
+                self.assertEqual(Payment.objects.count(), 1)
+                attempt = Payment.objects.get()
+                self.assertEqual(attempt.creation_status, PaymentCreationStatus.UNCERTAIN if code == 999 else PaymentCreationStatus.REJECTED)
+                self.assertIsNone(attempt.authority)
                 self.order.refresh_from_db()
                 self.assertEqual(self.order.status, OrderStatus.PENDING_PAYMENT)
+                transaction.set_rollback(True)
 
     def test_invalid_request_track_ids_are_rejected(self):
         for track_id in (None, "", 0, -1, True, 1.5, "1/redirect", "01", 2**63):
-            with self.subTest(track_id=track_id):
+            with self.subTest(track_id=track_id), transaction.atomic():
                 self.http.side_effect = None
                 self.http.return_value = self.http_response({"result": 100, "trackId": track_id})
                 with self.assertRaises(PaymentError):
                     self.start_payment()
-                self.assertEqual(Payment.objects.count(), 0)
+                self.assertEqual(Payment.objects.get().creation_status, PaymentCreationStatus.UNCERTAIN)
+                transaction.set_rollback(True)
 
     def test_invalid_api_responses_are_handled(self):
         for body in (b"not json", b"[]", b"null", b'{"result":true}', b'{"result":"100"}', b"{}", b"\xff"):
-            with self.subTest(body=body):
+            with self.subTest(body=body), transaction.atomic():
                 self.http.side_effect = None
                 self.http.return_value = self.http_response(body=body)
                 with self.assertRaises(PaymentError):
                     self.start_payment()
-                self.assertEqual(Payment.objects.count(), 0)
+                self.assertEqual(Payment.objects.get().creation_status, PaymentCreationStatus.UNCERTAIN)
+                transaction.set_rollback(True)
 
     def test_connection_timeout_and_http_errors_are_handled(self):
         for error in (
@@ -298,11 +324,12 @@ class CreatePaymentTests(PaymentFixtureMixin, PaymentTestCase):
             HTTPError("https://gateway.zibal.ir/v1/request", 302, "redirect", {}, None),
             HTTPError("https://gateway.zibal.ir/v1/request", 503, "unavailable", {}, None),
         ):
-            with self.subTest(error=type(error).__name__):
+            with self.subTest(error=type(error).__name__), transaction.atomic():
                 self.http.side_effect = error
                 with self.assertRaises(PaymentError):
                     self.start_payment()
-                self.assertEqual(Payment.objects.count(), 0)
+                self.assertEqual(Payment.objects.get().creation_status, PaymentCreationStatus.UNCERTAIN)
+                transaction.set_rollback(True)
         self.http.side_effect = None
         self.http.return_value = self.http_response({}, status=502)
         with self.assertRaises(PaymentError):
@@ -315,10 +342,9 @@ class CreatePaymentTests(PaymentFixtureMixin, PaymentTestCase):
 
     def test_duplicate_track_id_is_handled_without_duplicate_payment(self):
         first = self.start_payment()
-        self.http.side_effect = None
-        self.http.return_value = self.http_response({"result": 100, "trackId": int(first.authority)})
-        with self.assertRaises(PaymentError):
-            self.start_payment()
+        second = self.start_payment()
+        self.assertEqual(second.pk, first.pk)
+        self.assertEqual(len(self.api_calls("/v1/request")), 1)
         self.assertEqual(Payment.objects.count(), 1)
 
     def test_credentials_and_raw_error_text_are_not_logged(self):
@@ -358,6 +384,219 @@ class CreatePaymentTests(PaymentFixtureMixin, PaymentTestCase):
         with self.assertRaises(PaymentError):
             self.start_payment()
         self.http.assert_not_called()
+
+    def test_timeout_preserves_request_and_cannot_issue_another_gateway_request(self):
+        self.http.side_effect = TimeoutError("synthetic timeout")
+        with self.assertRaises(PaymentError):
+            self.start_payment()
+        payment = self.order.payments.get()
+        self.assertIsNotNone(payment.request_id)
+        self.assertIsNone(payment.authority)
+        self.assertEqual(payment.creation_status, PaymentCreationStatus.UNCERTAIN)
+        self.assertEqual(payment.status, PaymentStatus.PENDING)
+        self.assertFalse(payment.needs_refund)
+        self.assertIsNone(payment.paid_at)
+        self.assertEqual(payment.metadata["creation"]["responses"][0]["outcome"], "uncertain")
+        self.http.side_effect = self.api_call
+        with self.assertRaises(PaymentError):
+            self.start_payment()
+        self.assertEqual(len(self.api_calls("/v1/request")), 1)
+        self.assertEqual(self.order.payments.count(), 1)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_documented_rejection_permits_a_new_attempt_without_erasing_evidence(self):
+        self.http.side_effect = None
+        self.http.return_value = self.http_response({"result": 104})
+        with self.assertRaises(PaymentError):
+            self.start_payment()
+        rejected = self.order.payments.get()
+        self.http.side_effect = self.api_call
+        ready = self.start_payment()
+        self.assertNotEqual(ready.request_id, rejected.request_id)
+        self.assertEqual(rejected.creation_status, PaymentCreationStatus.REJECTED)
+        self.assertEqual(rejected.metadata["creation"]["responses"][0]["result"], 104)
+        self.assertEqual(self.order.payments.count(), 2)
+        self.assertEqual(ready.creation_status, PaymentCreationStatus.READY)
+
+    def test_local_payment_expiry_reuses_known_session_without_new_http_request(self):
+        first = self.start_payment()
+        Payment.objects.filter(pk=first.pk).update(status=PaymentStatus.EXPIRED)
+        reused = self.start_payment()
+        self.assertEqual(reused.pk, first.pk)
+        self.assertEqual(reused.authority, first.authority)
+        self.assertEqual(reused.status, PaymentStatus.PENDING)
+        self.assertEqual(len(self.api_calls("/v1/request")), 1)
+
+    def test_multiple_historical_pending_attempts_block_new_creation(self):
+        self.historical_payment()
+        self.historical_payment()
+        self.http.reset_mock()
+        with self.assertRaises(PaymentError):
+            self.start_payment()
+        self.http.assert_not_called()
+
+    def test_created_track_is_preserved_if_cancellation_wins_during_http(self):
+        from orders.services import cancel_order
+        def cancel_then_reply(request, *, timeout):
+            cancel_order(self.order)
+            return self.api_call(request, timeout=timeout)
+        self.http.side_effect = cancel_then_reply
+        with self.assertRaises(PaymentError):
+            self.start_payment()
+        payment = self.order.payments.get()
+        self.assertIn(payment.authority, self.server_transactions)
+        self.assertEqual(payment.creation_status, PaymentCreationStatus.REVIEW)
+        self.assertFalse(payment.requires_manual_review)  # Creating a session is not received money.
+        self.assertIsNone(payment.paid_at)
+        self.assertFalse(payment.needs_refund)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.CANCELLED)
+        self.assertTrue(self.order.inventory_released)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 5)
+
+    def test_order_amount_change_during_http_keeps_created_track_for_review(self):
+        def change_then_reply(request, *, timeout):
+            Order.objects.filter(pk=self.order.pk).update(total=self.order.total + 1)
+            return self.api_call(request, timeout=timeout)
+        self.http.side_effect = change_then_reply
+        with self.assertRaises(PaymentError):
+            self.start_payment()
+        payment = self.order.payments.get()
+        self.assertEqual(payment.creation_status, PaymentCreationStatus.REVIEW)
+        self.assertEqual(payment.amount, self.order.total)
+        self.assertEqual(payment.metadata["creation"]["responses"][0]["track_id"], payment.authority)
+
+    def test_callback_can_bind_request_before_creation_response_is_applied(self):
+        callbacks = []
+        def callback_then_reply(request, *, timeout):
+            response = self.api_call(request, timeout=timeout)
+            if urlsplit(request.full_url).path == "/v1/request":
+                attempt = self.order.payments.get()
+                track_id = next(iter(self.server_transactions))
+                data = {"trackId": track_id, "orderId": self.order.order_number, "success": "1", "status": "2"}
+                callbacks.append(self.client.get(reverse("payments:callback_request", args=[attempt.request_id]), data))
+            return response
+        self.http.side_effect = callback_then_reply
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid:
+            payment = self.start_payment()
+        paid.assert_called_once()
+        self.assertTrue(payment.is_successful)
+        self.assertEqual(callbacks[0].url, reverse("payments:result_success", args=[self.order.order_number]))
+        self.assertEqual(payment.reference_id, self.server_transactions[payment.authority]["refNumber"])
+        self.assertEqual(payment.callback_count, 1)
+        self.assertIn("verification_history", payment.metadata)
+        self.assertIn("responses", payment.metadata["creation"])
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_unexpected_creation_failure_is_not_swallowed_and_keeps_durable_attempt(self):
+        self.http.side_effect = RuntimeError("synthetic unexpected failure")
+        with self.assertRaises(RuntimeError):
+            self.start_payment()
+        payment = self.order.payments.get()
+        self.assertEqual(payment.creation_status, PaymentCreationStatus.REQUESTING)
+        self.assertIsNone(payment.authority)
+        self.http.side_effect = self.api_call
+        with self.assertRaises(PaymentError):
+            self.start_payment()
+        self.assertEqual(len(self.api_calls("/v1/request")), 1)
+
+    def test_duplicate_gateway_track_for_another_order_keeps_both_attempts(self):
+        first = self.start_payment()
+        cart = Cart.objects.get(user=self.customer)
+        CartItem.objects.create(cart=cart, variant=self.variant, quantity=1)
+        another = create_order(customer=self.customer, cart=cart, address=self.address)
+        self.http.side_effect = None
+        self.http.return_value = self.http_response({"result": 100, "trackId": int(first.authority)})
+        with self.assertRaises(PaymentError):
+            create_payment_for_order(another)
+        current = another.payments.get()
+        self.assertIsNone(current.authority)
+        self.assertEqual(current.creation_status, PaymentCreationStatus.REVIEW)
+        self.assertEqual(current.metadata["creation"]["responses"][0]["track_id"], first.authority)
+        first.refresh_from_db()
+        self.assertEqual(first.creation_status, PaymentCreationStatus.READY)
+        self.assertEqual(Payment.objects.count(), 2)
+
+    def test_manual_receipt_committed_during_creation_blocks_the_returned_session(self):
+        def manual_then_reply(request, *, timeout):
+            Payment.objects.create(
+                order=self.order, gateway="zibal", authority="987654321", amount=self.order.total,
+                status=PaymentStatus.MANUAL_REVIEW, paid_at=timezone.now(),
+                metadata={"verification": {"result": 100, "status": 1, "paidAt": "2026-11-14T10:28:00"}},
+            )
+            return self.api_call(request, timeout=timeout)
+        self.http.side_effect = manual_then_reply
+        with self.assertRaises(PaymentError):
+            self.start_payment()
+        created = self.order.payments.get(request_id__isnull=False)
+        self.assertEqual(created.creation_status, PaymentCreationStatus.REVIEW)
+        self.assertIsNotNone(created.authority)
+        self.assertFalse(created.needs_refund)
+        self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
+
+    def test_timeout_after_remote_creation_can_be_resolved_by_verified_correlated_callback(self):
+        def create_then_timeout(request, *, timeout):
+            self.api_call(request, timeout=timeout)
+            raise TimeoutError("synthetic missing response")
+        self.http.side_effect = create_then_timeout
+        with self.assertRaises(PaymentError):
+            self.start_payment()
+        attempt = self.order.payments.get()
+        track_id = next(iter(self.server_transactions))
+        self.http.side_effect = self.api_call
+        response = self.client.get(reverse("payments:callback_request", args=[attempt.request_id]), {
+            "trackId": track_id, "orderId": self.order.order_number, "success": "1", "status": "2",
+        })
+        attempt.refresh_from_db()
+        self.assertTrue(attempt.is_successful)
+        self.assertEqual(attempt.authority, track_id)
+        self.assertEqual(attempt.creation_status, PaymentCreationStatus.READY)
+        self.assertEqual(attempt.metadata["creation"]["responses"][0]["outcome"], "uncertain")
+        self.assertEqual(response.url, reverse("payments:result_success", args=[self.order.order_number]))
+        self.assertEqual(len(self.api_calls("/v1/request")), 1)
+
+    def test_failed_callback_during_creation_does_not_get_its_order_state_reset(self):
+        def callback_then_reply(request, *, timeout):
+            response = self.api_call(request, timeout=timeout)
+            if urlsplit(request.full_url).path == "/v1/request":
+                attempt = self.order.payments.get()
+                track_id = next(iter(self.server_transactions))
+                self.server_transactions[track_id]["status"] = 5
+                self.client.get(reverse("payments:callback_request", args=[attempt.request_id]), {
+                    "trackId": track_id, "orderId": self.order.order_number, "success": "0", "status": "5",
+                })
+            return response
+        self.http.side_effect = callback_then_reply
+        attempt = self.start_payment()
+        self.assertEqual(attempt.status, PaymentStatus.FAILED)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.PAYMENT_FAILED)
+        self.assertEqual(self.order.payment_status, PaymentStatus.FAILED)
+
+    def test_changed_identity_after_callback_binding_during_timeout_requires_review(self):
+        def callback_then_timeout(request, *, timeout):
+            response = self.api_call(request, timeout=timeout)
+            if urlsplit(request.full_url).path == "/v1/request":
+                attempt = self.order.payments.get()
+                track_id = next(iter(self.server_transactions))
+                self.server_transactions[track_id]["status"] = -1
+                self.client.get(reverse("payments:callback_request", args=[attempt.request_id]), {
+                    "trackId": track_id, "orderId": self.order.order_number, "success": "0", "status": "-1",
+                })
+                Order.objects.filter(pk=self.order.pk).update(total=self.order.total + 10)
+                raise TimeoutError("synthetic missing creation response")
+            return response
+        self.http.side_effect = callback_then_timeout
+        with self.assertRaises(PaymentError):
+            self.start_payment()
+        attempt = self.order.payments.get()
+        self.assertIsNotNone(attempt.authority)
+        self.assertEqual(attempt.creation_status, PaymentCreationStatus.REVIEW)
+        self.assertFalse(attempt.needs_refund)
+        self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
 
 
 class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
@@ -667,6 +906,7 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
 
     def test_network_and_http_failures_during_inquiry_are_retryable_and_redacted(self):
         sensitive = "unit-test-merchant-and-card-data"
+        original_metadata = json.loads(json.dumps(self.payment.metadata))
         errors = (
             URLError(sensitive), TimeoutError(sensitive), OSError(sensitive),
             BadStatusLine(sensitive), IncompleteRead(sensitive.encode(), 100),
@@ -681,7 +921,7 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
                             process_callback(self.payment, self.callback_data(self.payment))
                     self.assertNotIn(sensitive, "\n".join(logs.output))
                     self.assert_unpaid()
-                    self.assertEqual(self.payment.metadata.keys(), {"redirect_url"})
+                    self.assertEqual(self.payment.metadata, original_metadata)
 
     def test_malformed_inquiry_responses_are_retryable_and_redacted(self):
         sensitive = "unit-test-merchant-and-card-data"
@@ -764,7 +1004,7 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertTrue(self.order.is_paid)
 
     def test_two_successful_attempts_do_not_pay_order_twice(self):
-        second = self.start_payment()
+        second = self.historical_payment()
         with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as mark_paid:
             first = process_callback(self.payment, self.callback_data(self.payment))
             extra = process_callback(second, self.callback_data(second))
@@ -779,7 +1019,7 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertEqual(self.variant.stock, 4)
 
     def test_three_successful_attempts_and_repeated_callbacks_finalize_once(self):
-        payments = [self.payment, self.start_payment(), self.start_payment()]
+        payments = [self.payment, self.historical_payment(), self.historical_payment()]
         self.variant.refresh_from_db()
         reserved_stock = self.variant.stock
         self.assertEqual(reserved_stock, 4)
@@ -809,7 +1049,7 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertEqual(self.variant.stock, reserved_stock)
 
     def test_later_failed_attempt_does_not_downgrade_paid_order(self):
-        second = self.start_payment()
+        second = self.historical_payment()
         process_callback(self.payment, self.callback_data(self.payment))
         self.set_outcome(second, "failed")
         process_callback(second, self.callback_data(second, "failed"))
@@ -956,6 +1196,45 @@ class CallbackViewTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertContains(response, f"https://gateway.zibal.ir/start/{self.payment.authority}")
         self.assertNotContains(response, "attacker.example")
 
+    def test_pending_redirect_is_blocked_after_order_cancellation(self):
+        from orders.services import cancel_order
+        cancel_order(self.order)
+        response = self.client.get(reverse("payments:redirect", args=[self.payment.pk]))
+        self.assertEqual(response.url, reverse("orders:detail", args=[self.order.order_number]))
+
+    def test_pending_redirect_is_blocked_after_deadline(self):
+        Order.objects.filter(pk=self.order.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+        response = self.client.get(reverse("payments:redirect", args=[self.payment.pk]))
+        self.assertEqual(response.url, reverse("orders:detail", args=[self.order.order_number]))
+
+    def test_pending_redirect_is_blocked_by_another_manual_receipt(self):
+        other = self.historical_payment()
+        Payment.objects.filter(pk=other.pk).update(status=PaymentStatus.MANUAL_REVIEW)
+        response = self.client.get(reverse("payments:redirect", args=[self.payment.pk]))
+        self.assertEqual(response.url, reverse("orders:detail", args=[self.order.order_number]))
+
+    def test_uncertain_attempt_cannot_expose_a_gateway_url(self):
+        Payment.objects.filter(pk=self.payment.pk).update(creation_status=PaymentCreationStatus.UNCERTAIN)
+        response = self.client.get(reverse("payments:redirect", args=[self.payment.pk]))
+        self.assertEqual(response.url, reverse("orders:detail", args=[self.order.order_number]))
+
+    def test_forged_correlated_callback_cannot_bind_unknown_attempt(self):
+        Payment.objects.filter(pk=self.payment.pk).update(authority=None, creation_status=PaymentCreationStatus.UNCERTAIN)
+        self.server_transactions[self.payment.authority]["amount"] += 10
+        response = self.client.get(reverse("payments:callback_request", args=[self.payment.request_id]),
+                                   self.callback_data(self.payment))
+        self.assertEqual(response.url, reverse("orders:detail", args=[self.order.order_number]))
+        self.payment.refresh_from_db()
+        self.assertIsNone(self.payment.authority)
+        self.assertEqual(self.payment.creation_status, PaymentCreationStatus.UNCERTAIN)
+        self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
+
+    def test_request_path_for_another_attempt_cannot_overwrite_known_track(self):
+        response = self.client.get(reverse("payments:callback_request", args=[uuid4()]),
+                                   self.callback_data(self.payment))
+        self.assertEqual(response.url, reverse("orders:detail", args=[self.order.order_number]))
+        self.assertEqual(len(self.api_calls("/v1/verify")), 0)
+
     def test_paid_payment_redirects_to_result(self):
         self.client.get(self.callback_url())
         response = self.client.get(reverse("payments:redirect", args=[self.payment.pk]))
@@ -1091,12 +1370,12 @@ class FullPurchaseFlowTests(PaymentFixtureMixin, PaymentTestCase):
         self.variant.refresh_from_db()
         self.assertEqual(self.variant.stock, 3)
 
-    def test_checkout_request_failure_preserves_created_order_and_retry(self):
+    def test_checkout_timeout_preserves_attempt_and_blocks_blind_retry(self):
         self.client.post(reverse("cart:add_variant"), {"variant_id": self.variant.pk, "quantity": 1})
         self.http.side_effect = URLError("offline")
         response, order = self.checkout()
         self.assertEqual(response.url, reverse("orders:detail", args=[order.order_number]))
-        self.assertEqual(order.payments.count(), 0)
+        self.assertEqual(order.payments.count(), 1)
         self.assertEqual(order.status, OrderStatus.PENDING_PAYMENT)
         self.assertFalse(order.is_paid)
         self.assertEqual(CartItem.objects.count(), 0)
@@ -1105,9 +1384,11 @@ class FullPurchaseFlowTests(PaymentFixtureMixin, PaymentTestCase):
         self.http.side_effect = self.api_call
         response = self.client.post(reverse("orders:pay", args=[order.order_number]), {"amount": "1"})
         payment = order.payments.get()
-        self.assertEqual(response.url, reverse("payments:redirect", args=[payment.pk]))
+        self.assertEqual(response.url, reverse("orders:detail", args=[order.order_number]))
+        self.assertEqual(payment.creation_status, PaymentCreationStatus.UNCERTAIN)
+        self.assertIsNone(payment.authority)
         self.assertEqual(payment.amount, order.total)
-        self.assertEqual(self.server_transactions[payment.authority]["amount"], int(order.total) * 10)
+        self.assertEqual(len(self.api_calls("/v1/request")), 1)
 
 
 class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
@@ -1116,7 +1397,7 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
     def setUp(self):
         super().setUp()
         self.build_payment_data()
-        self.payments = [self.start_payment() for _ in range(3)]
+        self.payments = [self.historical_payment() for _ in range(3)]
         self.payment = self.payments[0]
         self.temp_dir = self.enterContext(TemporaryDirectory(prefix="minikandoo-zibal-recovery-test-"))
         self.backup = Path(self.temp_dir) / "synthetic-test-only.sql.gz"
@@ -1141,13 +1422,14 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
         digest = hashlib.sha256(self.backup.read_bytes()).hexdigest()
         Path(str(self.backup) + ".sha256").write_text(f"{digest}  {self.backup.name}\n")
 
-    def reconcile(self, *, apply=False, backup=None, track_ids=None, gateway_timezone=None):
+    def reconcile(self, *, apply=False, backup=None, track_ids=None, gateway_timezone=None, request_id=None):
         self.command_output = io.StringIO()
         call_command(
             "reconcile_zibal_payments", order_number=self.order.order_number,
             track_id=track_ids or [payment.authority for payment in reversed(self.payments)],
             apply=apply, backup=str(backup) if backup else None,
             gateway_timezone=gateway_timezone, stdout=self.command_output,
+            request_id=request_id,
         )
         return self.report()
 
@@ -1251,7 +1533,7 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
 
 
     def test_existing_valid_primary_is_preserved_and_all_new_payments_need_refunds(self):
-        prior = self.start_payment()
+        prior = self.historical_payment()
         process_callback(prior, self.callback_data(prior))
         self.order.refresh_from_db()
         original_paid_at = self.order.paid_at
@@ -1267,7 +1549,7 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertTrue(report["inventory_unchanged"])
 
     def test_another_gateway_paid_transaction_requires_explicit_selection(self):
-        other = self.start_payment()
+        other = self.historical_payment()
         self.server_transactions[other.authority]["status"] = 1
         with self.assertRaises(CommandError):
             self.reconcile(apply=True, backup=self.backup)
@@ -1288,7 +1570,7 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertEqual(report["replayed"], [])
 
     def test_historical_success_is_not_accepted_as_zibal_evidence(self):
-        prior = self.start_payment()
+        prior = self.historical_payment()
         Payment.objects.filter(pk=prior.pk).update(gateway="legacy-provider", status=PaymentStatus.SUCCESSFUL)
         mark_order_paid(self.order)
         with self.assertRaises(CommandError):
@@ -1596,6 +1878,349 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
         self.assertFalse(self.order.payments.filter(needs_refund=True).exists())
 
+    def creation_attempt(self, *, rejected=False):
+        return Payment.objects.create(
+            order=self.order, gateway="zibal", amount=self.order.total, request_id=uuid4(),
+            creation_status=PaymentCreationStatus.REJECTED if rejected else PaymentCreationStatus.UNCERTAIN,
+            status=PaymentStatus.FAILED if rejected else PaymentStatus.PENDING,
+            metadata={"creation": {"responses": [{"outcome": "rejected" if rejected else "uncertain"}]}},
+        )
+
+    def remote_creation(self, attempt, *, paid_at=None):
+        result = get_gateway().create_payment(self.order, request_id=attempt.request_id)
+        self.server_transactions[result.authority].update(
+            status=1, paidAt=paid_at or (timezone.now() - timedelta(seconds=2)).isoformat(),
+        )
+        return result.authority
+
+    def test_unselected_unknown_creation_blocks_primary_and_reports_request_identity(self):
+        attempt = self.creation_attempt()
+        report = self.reconcile()
+        self.assertIsNone(report["planned_primary"])
+        self.assertEqual(report["unresolved_creation_requests"][0]["request_id"], str(attempt.request_id))
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid:
+            with self.assertRaises(CommandError):
+                self.reconcile(apply=True, backup=self.backup)
+        paid.assert_not_called()
+        self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
+        attempt.refresh_from_db()
+        self.assertIsNone(attempt.authority)
+
+    def test_unknown_creation_inspection_does_not_bind_or_verify(self):
+        attempt = self.creation_attempt()
+        track_id = self.remote_creation(attempt)
+        self.http.reset_mock()
+        report = self.reconcile(request_id=str(attempt.request_id), track_ids=[track_id])
+        self.assertEqual(report["before"], report["after"])
+        self.assertFalse(report["fulfillment_authorized"])
+        attempt.refresh_from_db()
+        self.assertIsNone(attempt.authority)
+        self.assertEqual(len(self.api_calls("/v1/inquiry")), 1)
+        self.assertEqual(len(self.api_calls("/v1/verify")), 0)
+
+    def test_binding_request_does_not_fulfill_until_complete_recovery_preflight(self):
+        attempt = self.creation_attempt()
+        track_id = self.remote_creation(attempt)
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid:
+            report = self.reconcile(request_id=str(attempt.request_id), track_ids=[track_id],
+                                    apply=True, backup=self.backup)
+        paid.assert_not_called()
+        self.assertTrue(report["resolved"])
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.authority, track_id)
+        self.assertEqual(attempt.status, PaymentStatus.MANUAL_REVIEW)
+        self.assertFalse(attempt.needs_refund)
+        self.assertIn("creation_resolution_plan", attempt.metadata["recovery_history"][0])
+        with self.assertRaises(CommandError):
+            self.reconcile(apply=True, backup=self.backup)  # Omitted successful bound receipt still blocks.
+        all_ids = [p.authority for p in self.payments] + [track_id]
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid:
+            final = self.reconcile(apply=True, backup=self.backup, track_ids=all_ids)
+        paid.assert_called_once()
+        self.assertEqual(final["actual_primary"], [self.payments[1].authority])
+        self.assertEqual(len(final["refund_required"]), 3)
+        self.assertTrue(final["inventory_unchanged"])
+
+    def test_request_binding_preserves_ambiguous_receipt_without_automatic_refund(self):
+        from orders.services import expire_due_orders
+        attempt = self.creation_attempt()
+        track_id = self.remote_creation(attempt, paid_at="2026-11-14T10:28:00")
+        Order.objects.filter(pk=self.order.pk).update(expires_at=timezone.now() - timedelta(minutes=1))
+        self.reconcile(request_id=str(attempt.request_id), track_ids=[track_id], apply=True, backup=self.backup)
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.status, PaymentStatus.MANUAL_REVIEW)
+        self.assertIsNone(attempt.gateway_paid_at)
+        self.assertEqual(attempt.metadata["verification"]["paidAt"], "2026-11-14T10:28:00")
+        self.assertFalse(attempt.needs_refund)
+        self.assertEqual(expire_due_orders(), 0)
+        all_ids = [p.authority for p in self.payments] + [track_id]
+        report = self.reconcile(track_ids=all_ids)
+        self.assertIsNone(report["planned_primary"])
+        self.assertIn(track_id, report["ambiguous_timestamps"])
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_request_binding_requires_valid_backup_before_gateway_operations(self):
+        attempt = self.creation_attempt()
+        track_id = self.remote_creation(attempt)
+        self.http.reset_mock()
+        with self.assertRaises(CommandError):
+            self.reconcile(request_id=str(attempt.request_id), track_ids=[track_id], apply=True)
+        Path(str(self.backup) + ".sha256").write_text("0" * 64 + "  " + self.backup.name + "\n")
+        with self.assertRaises(CommandError):
+            self.reconcile(request_id=str(attempt.request_id), track_ids=[track_id], apply=True, backup=self.backup)
+        self.http.assert_not_called()
+        self.assertIsNone(Payment.objects.get(pk=attempt.pk).authority)
+
+    def test_request_binding_rejects_foreign_identity_and_multiple_selected_tracks(self):
+        attempt = self.creation_attempt()
+        track_id = self.remote_creation(attempt)
+        for request_id, track_ids in ((str(uuid4()), [track_id]), (str(attempt.request_id), [track_id, self.payment.authority])):
+            with self.subTest(request_id=request_id):
+                with self.assertRaises(CommandError):
+                    self.reconcile(request_id=request_id, track_ids=track_ids, apply=True, backup=self.backup)
+        self.server_transactions[track_id]["orderId"] = "FOREIGN-ORDER"
+        with self.assertRaises(CommandError):
+            self.reconcile(request_id=str(attempt.request_id), track_ids=[track_id], apply=True, backup=self.backup)
+        self.assertIsNone(Payment.objects.get(pk=attempt.pk).authority)
+
+    def test_documented_rejected_request_does_not_block_valid_complete_receipt_recovery(self):
+        attempt = self.creation_attempt(rejected=True)
+        report = self.reconcile(apply=True, backup=self.backup)
+        self.assertEqual(report["unresolved_creation_requests"], [])
+        self.assertEqual(report["actual_primary"], [self.payments[1].authority])
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.creation_status, PaymentCreationStatus.REJECTED)
+        self.assertIsNone(attempt.authority)
+
+
+@skipUnlessDBFeature("has_select_for_update")
+@override_settings(**TEST_SETTINGS)
+class ConcurrentCreationTests(PaymentFixtureMixin, PaymentAPIStubMixin, TransactionTestCase):
+    """Durable creation phases exercised with real MariaDB Order/Payment locks."""
+
+    def setUp(self):
+        super().setUp()
+        self.build_payment_data()
+
+    def creation(self):
+        close_old_connections()
+        try:
+            return create_payment_for_order(Order.objects.get(pk=self.order.pk))
+        finally:
+            close_old_connections()
+
+    def delayed_create(self, started, release, *, timeout_after_reply=False):
+        def api(request, *, timeout):
+            if urlsplit(request.full_url).path != "/v1/request":
+                return self.api_call(request, timeout=timeout)
+            self.assertFalse(connection.in_atomic_block)
+            # The real remote transaction can exist before its response arrives.
+            response = self.api_call(request, timeout=timeout)
+            started.set()
+            if not release.wait(10):
+                raise AssertionError("Delayed creation test was not released")
+            if timeout_after_reply:
+                raise TimeoutError("synthetic uncertain creation outcome")
+            return response
+        return api
+
+    def test_delayed_create_holds_neither_order_nor_payment_lock(self):
+        started, release = Event(), Event()
+        self.http.side_effect = self.delayed_create(started, release)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.creation)
+            try:
+                self.assertTrue(started.wait(10))
+                attempt = self.order.payments.get()
+                self.assertEqual(attempt.creation_status, PaymentCreationStatus.REQUESTING)
+                self.assertIsNone(attempt.authority)
+                with transaction.atomic():
+                    Order.objects.select_for_update(nowait=True).get(pk=self.order.pk)
+                    Payment.objects.select_for_update(nowait=True).get(pk=attempt.pk)
+            finally:
+                release.set()
+            self.assertEqual(future.result(20).creation_status, PaymentCreationStatus.READY)
+
+    def test_expiration_commits_during_create_and_late_receipt_cannot_revive_order(self):
+        from orders.services import expire_due_orders
+        started, release = Event(), Event()
+        self.http.side_effect = self.delayed_create(started, release)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.creation)
+            try:
+                self.assertTrue(started.wait(10))
+                Order.objects.filter(pk=self.order.pk).update(expires_at=timezone.now() - timedelta(minutes=1))
+                self.assertEqual(expire_due_orders(), 1)
+            finally:
+                release.set()
+            with self.assertRaises(PaymentError):
+                future.result(20)
+        attempt = self.order.payments.get()
+        self.assertEqual(attempt.creation_status, PaymentCreationStatus.REVIEW)
+        self.assertIsNotNone(attempt.authority)
+        self.http.side_effect = self.api_call
+        receipt = process_callback(attempt, self.callback_data(attempt))
+        self.assertTrue(receipt.needs_refund)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.CANCELLED)
+        self.assertFalse(self.order.is_paid)
+        self.assertTrue(self.order.inventory_released)
+        self.assertEqual(expire_due_orders(), 0)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 5)
+
+    def test_two_simultaneous_submissions_send_only_one_remote_request(self):
+        started, release = Event(), Event()
+        self.http.side_effect = self.delayed_create(started, release)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(self.creation)
+            try:
+                self.assertTrue(started.wait(10))
+                second = pool.submit(self.creation)
+                with self.assertRaises(PaymentError):
+                    second.result(5)
+                self.assertEqual(self.order.payments.count(), 1)
+                self.assertEqual(len(self.api_calls("/v1/request")), 1)
+            finally:
+                release.set()
+            payment = first.result(20)
+        self.assertEqual(self.start_payment().pk, payment.pk)
+        self.assertEqual(len(self.api_calls("/v1/request")), 1)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_verified_callback_wins_before_create_finalization_and_is_not_overwritten(self):
+        from orders.services import expire_due_orders
+        started, release = Event(), Event()
+        self.http.side_effect = self.delayed_create(started, release)
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid, ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.creation)
+            try:
+                self.assertTrue(started.wait(10))
+                attempt = self.order.payments.get()
+                track_id = next(iter(self.server_transactions))
+                callback = {"trackId": track_id, "orderId": self.order.order_number,
+                            "success": "1", "status": "2", "request_id": str(attempt.request_id)}
+                receipt = process_callback(attempt, callback)
+                saved_reference, saved_time = receipt.reference_id, receipt.paid_at
+                self.assertTrue(receipt.is_successful)
+                self.assertEqual(expire_due_orders(), 0)
+            finally:
+                release.set()
+            finalized = future.result(20)
+        paid.assert_called_once()
+        self.assertEqual(finalized.authority, track_id)
+        self.assertEqual(finalized.reference_id, saved_reference)
+        self.assertEqual(finalized.paid_at, saved_time)
+        self.assertEqual(finalized.callback_count, 1)
+        self.assertTrue(finalized.is_successful)
+        self.assertIn("creation", finalized.metadata)
+        self.assertIn("verification_history", finalized.metadata)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_timeout_after_remote_create_is_durable_and_does_not_resend(self):
+        started, release = Event(), Event()
+        self.http.side_effect = self.delayed_create(started, release, timeout_after_reply=True)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.creation)
+            try:
+                self.assertTrue(started.wait(10))
+                with transaction.atomic():
+                    Order.objects.select_for_update(nowait=True).get(pk=self.order.pk)
+            finally:
+                release.set()
+            with self.assertRaises(PaymentError):
+                future.result(20)
+        attempt = self.order.payments.get()
+        self.assertEqual(attempt.creation_status, PaymentCreationStatus.UNCERTAIN)
+        with self.assertRaises(PaymentError):
+            self.start_payment()
+        self.assertEqual(len(self.api_calls("/v1/request")), 1)
+        self.assertEqual(self.order.payments.count(), 1)
+        self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
+
+    def test_manual_receipt_wins_while_creation_waits_and_keeps_reservation(self):
+        from orders.services import expire_due_orders
+        started, release = Event(), Event()
+        self.http.side_effect = self.delayed_create(started, release)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.creation)
+            try:
+                self.assertTrue(started.wait(10))
+                with transaction.atomic():
+                    order = Order.objects.select_for_update().get(pk=self.order.pk)
+                    Payment.objects.create(order=order, gateway="zibal", amount=order.total,
+                                           authority="87654321", status=PaymentStatus.MANUAL_REVIEW,
+                                           paid_at=timezone.now(), metadata={"verification": {"status": 1}})
+                    order.expires_at = timezone.now() - timedelta(seconds=1)
+                    order.save(update_fields=["expires_at"])
+                self.assertEqual(expire_due_orders(), 0)
+            finally:
+                release.set()
+            with self.assertRaises(PaymentError):
+                future.result(20)
+        self.assertFalse(Order.objects.get(pk=self.order.pk).inventory_released)
+        self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_uncertain_response_cannot_undo_a_callback_that_already_finalized(self):
+        started, release = Event(), Event()
+        self.http.side_effect = self.delayed_create(started, release, timeout_after_reply=True)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.creation)
+            try:
+                self.assertTrue(started.wait(10))
+                attempt = self.order.payments.get()
+                track_id = next(iter(self.server_transactions))
+                receipt = process_callback(attempt, {
+                    "trackId": track_id, "orderId": self.order.order_number,
+                    "success": "1", "status": "2", "request_id": str(attempt.request_id),
+                })
+            finally:
+                release.set()
+            finalized = future.result(20)
+        self.assertTrue(finalized.is_successful)
+        self.assertEqual(finalized.reference_id, receipt.reference_id)
+        self.assertEqual(finalized.creation_status, PaymentCreationStatus.READY)
+        self.assertEqual(finalized.metadata["creation"]["responses"][0]["outcome"], "uncertain")
+
+    def test_conflicting_create_response_preserves_already_finalized_gateway_identity(self):
+        started, release = Event(), Event()
+        original = self.delayed_create(started, release)
+        def conflicting(request, *, timeout):
+            response = original(request, timeout=timeout)
+            if urlsplit(request.full_url).path == "/v1/request":
+                return self.http_response({"result": 100, "trackId": 987654321})
+            return response
+        self.http.side_effect = conflicting
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid, ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(self.creation)
+            try:
+                self.assertTrue(started.wait(10))
+                attempt = self.order.payments.get()
+                track_id = next(iter(self.server_transactions))
+                receipt = process_callback(attempt, {
+                    "trackId": track_id, "orderId": self.order.order_number,
+                    "success": "1", "status": "2", "request_id": str(attempt.request_id),
+                })
+            finally:
+                release.set()
+            with self.assertRaises(PaymentError):
+                future.result(20)
+        paid.assert_called_once()
+        current = self.order.payments.get()
+        self.assertTrue(current.is_successful)
+        self.assertEqual(current.authority, track_id)
+        self.assertEqual(current.transaction_id, receipt.transaction_id)
+        self.assertEqual(current.reference_id, receipt.reference_id)
+        self.assertEqual(current.creation_status, PaymentCreationStatus.REVIEW)
+        self.assertEqual(current.metadata["creation"]["responses"][0]["track_id"], "987654321")
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
 
 @skipUnlessDBFeature("has_select_for_update")
 @override_settings(**TEST_SETTINGS)
@@ -1635,7 +2260,7 @@ class ConcurrentCallbackTests(PaymentFixtureMixin, PaymentAPIStubMixin, Transact
         self.assertEqual(self.variant.stock, 4)
 
     def test_concurrent_successful_attempts_only_pay_order_once(self):
-        second = self.start_payment()
+        second = self.historical_payment()
         with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as mark_paid:
             self.run_callbacks([self.payment, second])
         self.assertEqual(mark_paid.call_count, 1)
@@ -1645,7 +2270,7 @@ class ConcurrentCallbackTests(PaymentFixtureMixin, PaymentAPIStubMixin, Transact
         self.assertEqual(self.variant.stock, 4)
 
     def test_concurrent_failed_attempt_cannot_downgrade_paid_order(self):
-        second = self.start_payment()
+        second = self.historical_payment()
         self.set_outcome(second, "failed")
         self.run_callbacks([self.payment, second])
         self.order.refresh_from_db()
@@ -1817,7 +2442,7 @@ class ConcurrentCallbackTests(PaymentFixtureMixin, PaymentAPIStubMixin, Transact
 
     def test_concurrent_manual_receipt_winner_blocks_aware_receipt(self):
         from payments.services import _apply_verified_callback
-        second = self.start_payment()
+        second = self.historical_payment()
         self.server_transactions[self.payment.authority]["paidAt"] = "2026-11-14T10:28:00"
         manual_applied = Event()
         def apply(snapshot, *args, **kwargs):
@@ -1895,7 +2520,7 @@ class ReceiptSafetyTests(PaymentFixtureMixin, PaymentTestCase):
     def setUp(self):
         super().setUp()
         self.build_payment_data()
-        self.first, self.second = self.start_payment(), self.start_payment()
+        self.first, self.second = self.historical_payment(), self.historical_payment()
 
     def test_ambiguous_first_receipt_cannot_be_bypassed_by_second_callback(self):
         self.server_transactions[self.first.authority]["paidAt"] = "2026-11-14T10:28:00"
@@ -1964,4 +2589,28 @@ class ReceiptSafetyTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertEqual(receipt.reference_id, "")
         self.assertEqual(receipt.metadata["decision"]["reason"], "receipt_identifiers_changed")
         self.assertTrue(receipt.metadata["verification_history"])
+        self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
+
+    def test_historical_success_evidence_in_nonfinal_status_blocks_another_callback(self):
+        Payment.objects.filter(pk=self.first.pk).update(
+            status=PaymentStatus.FAILED, paid_at=None, gateway_paid_at=None,
+            metadata={"verification": {"result": 100, "status": 1, "paidAt": "2026-11-14T10:28:00"}},
+        )
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid:
+            receipt = process_callback(self.second, self.callback_data(self.second))
+        paid.assert_not_called()
+        self.assertEqual(receipt.status, PaymentStatus.MANUAL_REVIEW)
+        self.assertEqual(receipt.metadata["decision"]["reason"], "another_receipt_requires_review")
+        self.assertFalse(receipt.needs_refund)
+        self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
+
+    def test_conflicting_inquiry_preserves_legacy_success_evidence_even_without_paid_at(self):
+        previous = {"result": 100, "status": 1, "paidAt": "2026-11-14T10:28:00"}
+        Payment.objects.filter(pk=self.first.pk).update(status=PaymentStatus.FAILED, metadata={"verification": previous})
+        self.set_outcome(self.first, "failed")
+        receipt = process_callback(self.first, self.callback_data(self.first, "failed"))
+        self.assertEqual(receipt.status, PaymentStatus.MANUAL_REVIEW)
+        self.assertFalse(receipt.needs_refund)
+        self.assertIn(previous, [entry["data"] for entry in receipt.metadata["verification_history"]])
+        self.assertEqual(receipt.metadata["verification"]["status"], 5)
         self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)

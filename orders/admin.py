@@ -3,6 +3,7 @@
 from django.contrib import admin, messages
 from django import forms
 from django.db.models import Count, Q
+from django.db import transaction
 from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
 
@@ -170,32 +171,34 @@ class OrderAdmin(admin.ModelAdmin):
     def manual_review_receipts(self, obj):
         return obj.manual_review_count
 
+    @transaction.atomic
     def save_model(self, request, obj, form, change):
-        """ویرایش فیلدها حفظ و تغییر وضعیت فقط از مسیر کنترل‌شده اعمال می‌شود."""
-        if change:
-            original = Order.objects.get(pk=obj.pk)
-            if original.status != obj.status:
-                new_status = obj.status
-                # ابتدا سایر فیلدهای ویرایش‌شده (کد رهگیری، یادداشت، مهلت) با وضعیت
-                # قبلی ذخیره می‌شوند تا از بین نروند، سپس گذار وضعیت از مسیر کنترل‌شده
-                # (و آزادسازی موجودی هنگام لغو) اعمال می‌گردد.
-                obj.status = original.status
-                super().save_model(request, obj, form, change)
-                try:
-                    transition_status(obj, new_status)
-                except OrderError as exc:
-                    messages.error(request, exc.message)
-                    return
-                messages.success(
-                    request,
-                    _("وضعیت سفارش %(order)s به «%(status)s» تغییر کرد.")
-                    % {
-                        "order": obj.order_number,
-                        "status": OrderStatus.customer_label(new_status),
-                    },
-                )
+        """Write only intentional edits to authoritative Order-first locked state."""
+        if not change:
+            return super().save_model(request, obj, form, change)
+        current = Order.objects.select_for_update().get(pk=obj.pk)
+        changed = set(form.changed_data)
+        if "status" in changed and obj.status != current.status:
+            try:
+                transition_status(current, obj.status)
+            except OrderError as exc:
+                obj.refresh_from_db()
+                messages.error(request, exc.message)
                 return
-        super().save_model(request, obj, form, change)
+            messages.success(request, _("وضعیت سفارش %(order)s به «%(status)s» تغییر کرد.") % {
+                "order": current.order_number, "status": current.status_label,
+            })
+        fields = changed & {"tracking_number", "customer_note", "expires_at"}
+        if "expires_at" in fields and (
+            current.is_paid or current.inventory_released or current.status == OrderStatus.CANCELLED
+        ):
+            fields.remove("expires_at")
+            messages.warning(request, _("مهلت سفارش پرداخت‌شده یا لغوشده تغییر داده نشد."))
+        for field in fields:
+            setattr(current, field, getattr(obj, field))
+        if fields:
+            current.save(update_fields=[*sorted(fields), "updated_at"])
+        obj.refresh_from_db()
 
     @admin.action(description=_("علامت‌گذاری به‌عنوان آماده ارسال"))
     def mark_ready_to_ship(self, request, queryset):

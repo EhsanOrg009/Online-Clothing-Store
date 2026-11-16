@@ -13,6 +13,7 @@ class PaymentAdmin(admin.ModelAdmin):
         "gateway",
         "amount",
         "status",
+        "creation_status",
         "needs_refund",
         "reference_id",
         "callback_count",
@@ -20,9 +21,10 @@ class PaymentAdmin(admin.ModelAdmin):
         "verified_at",
         "gateway_paid_at",
     )
-    list_filter = ("status", "needs_refund", "gateway", "created_at")
+    list_filter = ("status", "creation_status", "needs_refund", "gateway", "created_at")
     search_fields = (
         "authority",
+        "request_id",
         "transaction_id",
         "reference_id",
         "order__order_number",
@@ -34,6 +36,8 @@ class PaymentAdmin(admin.ModelAdmin):
         "amount",
         "status",
         "authority",
+        "request_id",
+        "creation_status",
         "transaction_id",
         "reference_id",
         "error_message",

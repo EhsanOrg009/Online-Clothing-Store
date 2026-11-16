@@ -15,6 +15,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
+from uuid import UUID, uuid4
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -26,7 +27,8 @@ from orders.services import OrderError, OrderInventoryUnavailable, OrderNotPayab
 
 from .gateways import PaymentGatewayError, get_gateway
 from .gateways.zibal import parse_callback
-from .models import Payment
+from .gateways.base import PaymentRequestRejected
+from .models import Payment, PaymentCreationStatus
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +69,34 @@ def classify_receipt(order, gateway_paid_at, timestamp_issue="", *, primary_exis
     return ReceiptDecision("accept", "paid_within_deadline")
 
 
-@transaction.atomic
 def create_payment_for_order(order: Order, request=None) -> Payment:
-    """ایجاد تراکنش پرداخت برای سفارش و دریافت آدرس درگاه."""
+    """Persist -> unlocked HTTP -> authoritative Order/Payment application.
+
+    Call directly, without an outer atomic transaction. Zibal's documented
+    request API has no idempotency key: an uncertain attempt is never resent.
+    """
+    try:
+        gateway = get_gateway()
+        snapshot, payment, created = _prepare_payment_request(order, gateway)
+    except PaymentGatewayError as exc:
+        raise PaymentError(_("تنظیمات درگاه پرداخت معتبر نیست؛ با پشتیبانی تماس بگیرید.")) from exc
+    if not created:
+        return payment
+
+    response, failure = None, None
+    try:
+        response = gateway.create_payment(snapshot, request, request_id=payment.request_id)
+    except PaymentGatewayError as exc:
+        failure = exc
+    payment, error = _finish_payment_request(snapshot, payment, response, failure)
+    if error:
+        # Raise after committing the durable attempt/evidence, never roll it back.
+        raise PaymentError(error) from failure
+    return payment
+
+
+@transaction.atomic
+def _prepare_payment_request(order, gateway):
     order = Order.objects.select_for_update().select_related("customer").get(pk=order.pk)
 
     if order.is_paid:
@@ -82,34 +109,108 @@ def create_payment_for_order(order: Order, request=None) -> Payment:
         raise PaymentError(_("اقلام این سفارش یافت نشد."))
     if order.payments.filter(status=PaymentStatus.MANUAL_REVIEW).exists():
         raise PaymentError(_("پرداخت قبلی نیازمند بررسی پشتیبانی است؛ لطفاً پرداخت تازه انجام ندهید."))
+    history = list(order.payments.order_by("pk"))
+    if any(p.creation_status in (
+        PaymentCreationStatus.REQUESTING, PaymentCreationStatus.UNCERTAIN, PaymentCreationStatus.REVIEW,
+    ) or potentially_successful_receipt(p) for p in history):
+        raise PaymentError(_("نتیجهٔ تلاش قبلی هنوز مشخص نیست؛ برای جلوگیری از پرداخت تکراری با پشتیبانی تماس بگیرید."))
+    pending = [p for p in history if p.status in (PaymentStatus.PENDING, PaymentStatus.EXPIRED)
+               and p.creation_status == PaymentCreationStatus.READY]
+    if len(pending) > 1:
+        raise PaymentError(_("چند تلاش پرداخت حل‌نشده وجود دارد؛ با پشتیبانی تماس بگیرید."))
+    if pending:
+        payment = Payment.objects.select_for_update().get(pk=pending[0].pk)
+        if payment.gateway != gateway.name or payment.amount != order.total or not payment.authority:
+            raise PaymentError(_("اطلاعات تلاش قبلی نیازمند بررسی پشتیبانی است."))
+        gateway.get_payment_url(payment)  # Validate the existing ID, never issue another request.
+        if payment.status == PaymentStatus.EXPIRED:
+            payment.status = PaymentStatus.PENDING
+            payment.error_message = ""
+            payment.save(update_fields=["status", "error_message"])
+        return order, payment, False
+    request_id = uuid4()
+    gateway.payment_request_payload(order, request_id=request_id)
+    payment = Payment.objects.create(
+        order=order, gateway=gateway.name, amount=order.total,
+        request_id=request_id, creation_status=PaymentCreationStatus.REQUESTING,
+        metadata={"creation": {
+            "request_id": str(request_id), "order_number": order.order_number,
+            "amount_toman": str(order.total), "requested_at": timezone.now().isoformat(),
+        }},
+    )
+    return order, payment, True
 
-    try:
-        gateway = get_gateway()
-        payment_request = gateway.create_payment(order, request)
-    except PaymentGatewayError as exc:
-        logger.error("خطای درگاه پرداخت: %s", exc)
-        raise PaymentError(_("اتصال به درگاه پرداخت ممکن نشد. لطفاً بعداً تلاش کنید.")) from exc
 
-    try:
-        payment = Payment.objects.create(
-            order=order,
-            gateway=gateway.name,
-            amount=order.total,  # مبلغ فقط از Backend؛ تبدیل ریال فقط در adapter
-            status=PaymentStatus.PENDING,
-            authority=payment_request.authority,
-            metadata={"redirect_url": payment_request.redirect_url},
-        )
-    except IntegrityError as exc:
-        logger.error("شناسه تکراری از درگاه برای سفارش %s", order.order_number)
-        raise PaymentError(_("شناسه پرداخت نامعتبر است. لطفاً دوباره تلاش کنید.")) from exc
-
-    if order.status == OrderStatus.PAYMENT_FAILED:
-        order.status = OrderStatus.PENDING_PAYMENT
-        order.payment_status = PaymentStatus.PENDING
+@transaction.atomic
+def _finish_payment_request(snapshot, attempt, response, failure):
+    order = Order.objects.select_for_update().get(pk=attempt.order_id)
+    payment = Payment.objects.select_for_update().get(pk=attempt.pk)
+    payment.order = order
+    creation = dict(payment.metadata.get("creation", {}))
+    observed_at = timezone.now().isoformat()
+    outcome = {"observed_at": observed_at}
+    error = ""
+    immutable_changed = (
+        payment.order_id != snapshot.pk or payment.amount != snapshot.total
+        or order.total != snapshot.total or order.order_number != snapshot.order_number
+        or payment.gateway != attempt.gateway or payment.request_id != attempt.request_id
+    )
+    if response is not None:
+        outcome.update(result=100, track_id=response.authority)
+        if payment.authority and payment.authority != response.authority:
+            error = "شناسهٔ پاسخ ایجاد با تراکنش ثبت‌شده مغایر است؛ نیازمند بررسی پشتیبانی."
+        elif payment.authority is None:
+            try:
+                with transaction.atomic():
+                    Payment.objects.filter(pk=payment.pk).update(authority=response.authority)
+                payment.authority = response.authority
+            except IntegrityError:
+                error = "شناسهٔ درگاه قبلاً ثبت شده؛ شواهد حفظ شد و نیازمند بررسی پشتیبانی است."
+        if not error:
+            payment.creation_status = PaymentCreationStatus.READY
+            payment.metadata["redirect_url"] = response.redirect_url
+        else:
+            payment.creation_status = PaymentCreationStatus.REVIEW
+    else:
+        rejected = isinstance(failure, PaymentRequestRejected)
+        outcome["outcome"] = "rejected" if rejected else "uncertain"
+        if rejected:
+            outcome["result"] = failure.code
+        # A callback may have authoritatively bound/finalized the attempt while
+        # the creation HTTP response was missing. Never undo that evidence.
+        if payment.authority is None and not potentially_successful_receipt(payment):
+            payment.creation_status = PaymentCreationStatus.REJECTED if rejected else PaymentCreationStatus.UNCERTAIN
+            if rejected:
+                payment.status = PaymentStatus.FAILED
+            error = (
+                "درخواست ایجاد پرداخت رد شد. لطفاً بعداً تلاش کنید."
+                if rejected else "نتیجهٔ ایجاد پرداخت مشخص نیست؛ پرداخت تازه انجام ندهید و با پشتیبانی تماس بگیرید."
+            )
+    if immutable_changed:
+        payment.creation_status = PaymentCreationStatus.REVIEW
+        error = "اطلاعات سفارش هنگام ایجاد پرداخت تغییر کرده است؛ نیازمند بررسی پشتیبانی."
+    if not error and not potentially_successful_receipt(payment) and (
+        not order.can_pay or not order.items.exists()
+        or order.payments.exclude(pk=payment.pk).filter(status=PaymentStatus.MANUAL_REVIEW).exists()
+    ):
+        payment.creation_status = PaymentCreationStatus.REVIEW
+        error = "سفارش هنگام ایجاد پرداخت دیگر قابل پرداخت نیست؛ شناسهٔ درگاه برای بررسی حفظ شد."
+    if error:
+        outcome["reason"] = "creation_requires_review" if response else outcome["outcome"]
+        if not potentially_successful_receipt(payment):
+            payment.error_message = error
+    creation["responses"] = [*creation.get("responses", []), outcome]
+    payment.metadata["creation"] = creation
+    payment.save(update_fields=["authority", "creation_status", "metadata", "status", "error_message"])
+    if (
+        not error and payment.status == PaymentStatus.PENDING
+        and not potentially_successful_receipt(payment) and order.status == OrderStatus.PAYMENT_FAILED
+    ):
+        order.status, order.payment_status = OrderStatus.PENDING_PAYMENT, PaymentStatus.PENDING
         order.save(update_fields=["status", "payment_status", "updated_at"])
-
-    logger.info("تراکنش %s برای سفارش %s ایجاد شد", payment.pk, order.order_number)
-    return payment
+    logger.log(logging.ERROR if error and failure else logging.WARNING if error else logging.INFO,
+               "Gateway creation attempt %s completed: %s", payment.request_id, payment.creation_status)
+    return payment, error
 
 
 def potentially_successful_receipt(payment):
@@ -129,7 +230,7 @@ def potentially_successful_receipt(payment):
 
 
 def receipt_history_fingerprint(payments):
-    fields = ("pk", "order_id", "gateway", "authority", "amount", "status", "needs_refund",
+    fields = ("pk", "order_id", "gateway", "authority", "request_id", "creation_status", "amount", "status", "needs_refund",
               "transaction_id", "reference_id", "paid_at", "gateway_paid_at", "metadata")
     records = [{key: getattr(payment, key) for key in fields}
                for payment in sorted(payments, key=lambda item: item.pk)]
@@ -177,6 +278,10 @@ def _authorize_recovery_primary(*, order, payments, verified, selected_track_ids
     potential = {p.authority for p in payments if potentially_successful_receipt(p)} | set(verified)
     if (
         not primary or primary.pk not in {p.pk for p in payments}
+        or any(p.creation_status in (PaymentCreationStatus.REQUESTING, PaymentCreationStatus.UNCERTAIN,
+                                     PaymentCreationStatus.REVIEW) or (
+            not p.authority and p.creation_status != PaymentCreationStatus.REJECTED
+        ) for p in payments)
         or primary.order_id != order.pk or primary.authority not in selected or potential - selected
         or selected - set(verified) or potential - set(verified)
         or any(result.timestamp_issue or result.gateway_paid_at is None
@@ -216,9 +321,18 @@ def _validate_callback(payment, callback_data):
     if payment.gateway == "zibal":
         try:
             callback = parse_callback(callback_data or {})
-            if callback["trackId"] != payment.authority or callback["orderId"] != payment.order.order_number:
+            supplied_request = (callback_data or {}).get("request_id")
+            if supplied_request is not None and (
+                not payment.request_id or UUID(str(supplied_request)) != payment.request_id
+            ):
+                raise PaymentGatewayError("Callback request does not match.")
+            if (
+                (payment.authority is not None and callback["trackId"] != payment.authority)
+                or (payment.authority is None and supplied_request is None)
+                or callback["orderId"] != payment.order.order_number
+            ):
                 raise PaymentGatewayError("Callback identifiers do not match.")
-        except PaymentGatewayError as exc:
+        except (PaymentGatewayError, ValueError, TypeError) as exc:
             raise PaymentError(_("اطلاعات بازگشت از درگاه نامعتبر است.")) from exc
 
 
@@ -249,10 +363,15 @@ def process_callback(payment: Payment, callback_data: dict | None = None, *,
     ):
         raise PaymentError("Invalid internal recovery primary authorization.")
     snapshot = Payment.objects.select_related("order").only(
-        "id", "order_id", "gateway", "authority", "amount", "status",
+        "id", "order_id", "gateway", "authority", "request_id", "amount", "status",
         "order__id", "order__order_number", "order__total",
     ).get(pk=payment.pk)
     _validate_callback(snapshot, callback_data)
+    expected_identity = _verification_identity(snapshot)
+    if snapshot.authority is None:
+        # Only an in-memory candidate until Verify/Inquiry validates the order,
+        # amount and track ID. An untrusted callback must not bind a DB record.
+        snapshot.authority = parse_callback(callback_data)["trackId"]
     result = None
     if not _callback_finalized(snapshot, callback_data, recovery_audit):
         try:
@@ -266,12 +385,13 @@ def process_callback(payment: Payment, callback_data: dict | None = None, *,
     return _apply_verified_callback(
         snapshot, callback_data, result, allow_fulfillment=allow_fulfillment,
         recovery_audit=recovery_audit, recovery_primary_authorized=recovery_primary_authorized,
+        expected_identity=expected_identity,
     )
 
 
 @transaction.atomic
 def _apply_verified_callback(snapshot, callback_data, result, *, allow_fulfillment,
-                             recovery_audit, recovery_primary_authorized):
+                             recovery_audit, recovery_primary_authorized, expected_identity=None):
     # Short transaction: Order -> Payment -> ProductVariant (ascending PK).
     order_id = Payment.objects.values_list("order_id", flat=True).get(pk=snapshot.pk)
     order = Order.objects.select_for_update().get(pk=order_id)
@@ -284,16 +404,43 @@ def _apply_verified_callback(snapshot, callback_data, result, *, allow_fulfillme
         return payment  # Another request may have committed while HTTP was waiting.
     if result is None:
         raise PaymentError("Payment state changed; retry verification.")
-    identity_changed = _verification_identity(payment) != _verification_identity(snapshot)
-    other_manual_receipt = order.payments.exclude(pk=payment.pk).filter(
-        status=PaymentStatus.MANUAL_REVIEW,
-    ).exists()
+    identity_changed = _verification_identity(payment) != (expected_identity or _verification_identity(snapshot))
+    # Binding by another verified callback during HTTP is compatible only with
+    # the same immutable identity and track ID.
+    if expected_identity and expected_identity[2] is None and payment.authority == snapshot.authority:
+        identity_changed = _verification_identity(payment) != (
+            *expected_identity[:2], snapshot.authority, *expected_identity[3:],
+        )
+    if not identity_changed and payment.authority is None:
+        try:
+            with transaction.atomic():
+                Payment.objects.filter(pk=payment.pk).update(authority=snapshot.authority)
+            payment.authority = snapshot.authority
+        except IntegrityError:
+            identity_changed = True
+    if not identity_changed:
+        payment.creation_status = PaymentCreationStatus.READY
+    elif payment.request_id:
+        payment.creation_status = PaymentCreationStatus.REVIEW
+    ledger = list(order.payments.order_by("pk"))
+    other_receipts = [p for p in ledger if p.pk != payment.pk]
+    other_manual_receipt = any(
+        p.status == PaymentStatus.MANUAL_REVIEW
+        or (p.status != PaymentStatus.SUCCESSFUL and potentially_successful_receipt(p))
+        for p in other_receipts
+    )
     authorization_matches = bool(recovery_primary_authorized and recovery_primary_authorized.matches(
-        order, payment, list(order.payments.order_by("pk")), recovery_audit, result,
+        order, payment, ledger, recovery_audit, result,
     ))
 
     observed_at = timezone.now()
+    previously_successful = potentially_successful_receipt(payment)
     history = list(payment.metadata.get("verification_history", []))
+    previous_verification = payment.metadata.get("verification")
+    if isinstance(previous_verification, dict) and previous_verification and not any(
+        isinstance(entry, dict) and entry.get("data") == previous_verification for entry in history
+    ):
+        history.append({"source": "stored_verification", "data": previous_verification})
     if result.raw != payment.metadata.get("verification"):
         history.append({"observed_at": observed_at.isoformat(), "data": result.raw})
     payment.metadata = {
@@ -310,9 +457,7 @@ def _apply_verified_callback(snapshot, callback_data, result, *, allow_fulfillme
     if result.successful:
         decision = classify_receipt(
             order, result.gateway_paid_at, result.timestamp_issue,
-            primary_exists=order.payments.exclude(pk=payment.pk).filter(
-                status=PaymentStatus.SUCCESSFUL, needs_refund=False,
-            ).exists(),
+            primary_exists=any(p.status == PaymentStatus.SUCCESSFUL and not p.needs_refund for p in other_receipts),
             other_manual_receipt=other_manual_receipt and not authorization_matches,
         )
         if identity_changed:
@@ -369,7 +514,7 @@ def _apply_verified_callback(snapshot, callback_data, result, *, allow_fulfillme
         )
         return payment
 
-    if payment.paid_at is not None:
+    if previously_successful:
         # A later conflicting gateway response cannot erase a previously verified
         # receipt awaiting review. Both sanitized responses remain in the history.
         payment.status = PaymentStatus.MANUAL_REVIEW

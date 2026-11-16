@@ -391,7 +391,7 @@ accounts/sms/
 ```
 payments/gateways/
 ├── base.py       PaymentGateway (ABC)
-│                 ├── create_payment(order, request) -> PaymentRequest
+│                 ├── create_payment(order, request, *, request_id=None) -> PaymentRequest
 │                 ├── verify_payment(payment, callback_data) -> VerificationResult
 │                 └── get_payment_url(payment) -> str
 ├── zibal.py      درخواست، تایید و استعلام JSON از API رسمی زیبال
@@ -403,23 +403,25 @@ payments/gateways/
 
 ```
   create_payment_for_order(order)
-   ├─ قفل سفارش
-   ├─ رد اگر: پرداخت‌شده / منقضی / قابل‌پرداخت‌نیست / بدون آیتم
-   ├─ gateway.create_payment() → trackId در authority + redirect_url
-   └─ ساخت Payment با amount = order.total  ★ از Backend
+   ├─ تراکنش کوتاه: قفل سفارش و بررسی eligibility، رزرو و رسید/ایجاد حل‌نشده
+   ├─ استفاده از session pending قبلی؛ درخواست نامطمئن دوباره ارسال نمی‌شود
+   ├─ ثبت Payment با UUID محلی، authority=NULL و amount = order.total؛ commit
+   ├─ gateway.create_payment() بیرون تراکنش/قفل؛ callback URL شامل UUID محلی
+   └─ تراکنش کوتاه Order → Payment: بازخوانی وضعیت و حفظ trackId/audit؛ بدون احیای سفارش
 
   صفحه‌ی Redirect
    └─ انتقال به https://gateway.zibal.ir/start/{trackId} با Referer دامنه فروشگاه
 
   payment_callback(request)
    ├─ اعتبارسنجی Query: trackId / success / status / orderId
-   ├─ یافتن Payment زیبال با trackId و تطبیق orderId
+   ├─ یافتن Payment با trackId یا UUID مسیر برای تلاش بدون شناسه؛ تطبیق orderId
    └─ process_callback(payment, callback_data)
         ├─ snapshot حداقلی و اعتبارسنجی شناسه‌های callback
         ├─ gateway.verify_payment() بیرون تراکنش و قفل ردیفی
         │    ├─ POST /v1/verify؛ برای 201/202 استعلام /v1/inquiry
         │    └─ تطبیق status=1، مبلغ ریالی، orderId و شماره مرجع
         └─ تراکنش کوتاه: قفل Order سپس Payment و خواندن وضعیت تازه
+             ├─ اتصال trackId نامعلوم فقط پس از شواهد سروری منطبق، زیر قفل
              ├─ callback_count و idempotency؛ رسید نهایی بازنویسی نمی‌شود
              ├─ تطبیق دوبارهٔ هویت، primary، رسید دستی دیگر و timestamp
              ├─ زمان مبهم/آینده/receipt حل‌نشدهٔ دیگر → MANUAL_REVIEW
@@ -441,6 +443,8 @@ payments/gateways/
 `PAYMENT_GATEWAY=zibal` و `ZIBAL_MERCHANT` از محیط خوانده می‌شوند؛ `SITE_URL` برای ساخت Callback استفاده می‌شود. تومان در دیتابیس باقی می‌ماند و تبدیل ریال فقط در adapter انجام می‌شود. جزئیات در [راهنمای پرداخت زیبال](docs/zibal-payment.md).
 
 `ZIBAL_PAID_AT_TIMEZONE` پیش‌فرض خالی دارد؛ نمونه‌های رسمی بدون offset، timezone را مشخص نمی‌کنند. تنظیم `TIME_ZONE` Django یا timezone سرور برای آن‌ها فرض نمی‌شود. raw `paidAt` حفظ و receipt مبهم بدون fulfillment/refund خودکار در manual review ثبت می‌شود. `Payment.gateway_paid_at` جدا از زمان‌های محلی است. callback با ترتیب `Order → Payment → ProductVariant` و انقضا با `Order → ProductVariant`، واریانت‌ها به ترتیب PK، سریالی می‌شوند. HTTP قبل از این قفل‌ها انجام می‌شود. [ابزار recovery](docs/zibal-verification-recovery.md) کل تاریخچهٔ پرداخت را بررسی می‌کند؛ مجوز محدود به primary یکتا، Inquiry کامل، تاریخچهٔ بدون ابهام و بکاپ تازه با SHA256 sidecar منطبق وابسته است. تغییر history حین Verify این مجوز را نامعتبر می‌کند.
+
+`creation_status` از وضعیت رسید مالی جداست. `requesting/uncertain/review` درخواست تازه و primary recovery را تا تعیین تکلیف مسدود می‌کنند؛ `--request-id` فقط اتصال کنترل‌شدهٔ شواهد با backup معتبر و بدون fulfillment است. مستند زیبال idempotency با UUID محلی را تضمین نمی‌کند. فرم ادمین سفارش نیز وضعیت تازه را زیر قفل می‌خواند و فقط editهای صریح را ذخیره می‌کند تا مالی/رزرو با instance قدیمی بازنویسی نشود. `payments/0004` برای ایجاد پایدار لازم است؛ startup با migration معوق و `MIGRATE_ON_START=0` متوقف می‌شود و migration خودکار اجرا نمی‌کند.
 
 ---
 

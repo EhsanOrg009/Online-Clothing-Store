@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -115,6 +116,9 @@ class BackupStackQA:
         logfile.write_text(logged_output)
         logfile.chmod(0o600)
         if result.returncode != expected:
+            # Synthetic QA data only; print the already redacted tail so a
+            # failing test/traceback is available without exposing env files.
+            print("QA failure diagnostics:\n" + "\n".join(logged_output.splitlines()[-100:]), flush=True)
             raise QAError(f"{phase} failed (exit {result.returncode}); inspect private QA log {logfile.name}.")
         return result
 
@@ -230,8 +234,13 @@ class BackupStackQA:
                               env=test_env, phase="full Django suite on isolated MariaDB", timeout=600)
             summary = re.search(r"Ran ([0-9]+) tests in ([0-9.]+)s", result.stdout + result.stderr)
             self.check("full Django suite on MariaDB", tests=int(summary[1]) if summary else None)
+        self.run([python, "manage.py", "migrate", "--check", "--noinput", "--settings=shop_mariadb_test_settings"],
+                 env=test_env, phase="read-only startup schema check rejects unmigrated isolated source", expected=1)
         self.run([python, "manage.py", "migrate", "--settings=shop_mariadb_test_settings", "--noinput"],
                  env=test_env, phase="migrations on isolated backup source", timeout=180)
+        self.run([python, "manage.py", "migrate", "--check", "--noinput", "--settings=shop_mariadb_test_settings"],
+                 env=test_env, phase="read-only startup schema check accepts migrated isolated source")
+        self.check("startup schema check blocks pending migrations without applying them")
         self.sql(
             "CREATE TABLE backup_restore_probe (id int PRIMARY KEY, value varchar(64) UNIQUE) ENGINE=InnoDB;\n"
             "CREATE TABLE backup_trigger_probe (id int) ENGINE=InnoDB;\n"
@@ -329,6 +338,11 @@ class BackupStackQA:
         self.report["retention_dry_run"] = next(event for event in events if event["event"] == "retention_plan")
         self.check("actual isolated schema engine, size, retention and capacity inspection")
 
+        # Capacity fixtures must not be deleted by an unrelated scheduled tick
+        # between dry-run and apply. Only this uniquely labelled QA worker stops.
+        self.container("db-backup")
+        self.compose("stop", "db-backup", phase="pause isolated scheduler during capacity fixtures")
+
         capacity_code = (
             "from datetime import timedelta; c=b.Config.from_env();\n"
             "with b.directory_lock(c.directory):\n"
@@ -356,6 +370,8 @@ class BackupStackQA:
         assert '"reason": "capacity_pressure"' in reclaimed.stdout and '"event": "backup_completed"' in reclaimed.stdout
         assert all(p.exists() for p in points) and self.historical.exists()
         self.check("capacity pressure runs safe pre-retention only in apply; dry-run preserves all pairs")
+        self.compose("up", "-d", "--wait", "--wait-timeout", "120", "db-backup",
+                     phase="resume isolated scheduler after capacity fixtures")
 
         hold_code = (
             "import sys; sys.path.insert(0, '/opt/minikandoo'); import db_backup as b; "
@@ -476,6 +492,10 @@ def main():
         qa.run_checks(skip_django=args.skip_django_tests)
     except (QAError, AssertionError, OSError, subprocess.TimeoutExpired) as exc:
         qa.report["failure"] = str(exc) if isinstance(exc, QAError) else type(exc).__name__
+        diagnostic = traceback.format_exc()
+        for secret in qa.redacted_values:
+            diagnostic = diagnostic.replace(secret, "[redacted synthetic credential]")
+        print(diagnostic, flush=True)
         try:
             logs = qa.compose("logs", "--no-color", "--tail", "40", "db-backup", phase="QA failure diagnostics").stdout
             safe_events = []

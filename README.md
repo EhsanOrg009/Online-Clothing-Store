@@ -447,7 +447,14 @@ uv run python manage.py test payments.tests.CallbackTests
 uv run python manage.py test --keepdb
 ```
 
-The project documentation reports **208 tests across 7 apps**, covering validation, rate limiting, OTP scenarios, pricing rules, overselling protection, order snapshots, cancellation and expiration, gateway signing and verification, idempotent callbacks, and end-to-end purchase flows.
+The suites cover validation, rate limiting, OTP, pricing, overselling, order snapshots, expiration, durable gateway requests, receipt reconciliation, idempotent callbacks and backup/restore. Use the isolated test configuration for local validation:
+
+```bash
+PYTHONPATH=scripts/qa uv run python manage.py test --settings=shop_test_settings --noinput
+uv run python scripts/qa/test_backup_stack.py
+```
+
+The second command runs the full suite with real MariaDB locks and the isolated Compose backup/restore harness. GitHub Actions workflows were removed at the project owner's request; these checks are run locally. Payment APIs are mocked, and the harness uses synthetic credentials, unique networks and temporary database storage.
 
 Tests use a separate database named `test_clothing_shop`. Ensure the database account used for local testing has the permissions required for that test database. Avoid granting broad global database privileges to production accounts merely to make tests pass.
 
@@ -557,8 +564,9 @@ The literal `zibal` merchant is Zibal's public test account and is allowed only 
 - `Payment.gateway_paid_at` stores the independently interpreted gateway time. A delayed callback can accept a payment made within the deadline while the order and reservation remain active. Callback arrival does not determine lateness.
 - Offset-bearing timestamps use their actual offset. Zibal's official examples omit offsets and do not document a timezone; without written confirmation and explicit configuration, those receipts require `manual_review` with no automatic fulfillment or refund decision.
 - Callback and expiration lock the order before payment/variant rows. Cancelled orders and released reservations are never revived. Extra successful receipts with reliable timestamps are flagged for refund handling; duplicate callbacks repeat no fulfillment.
-- Two additive migrations introduce gateway time, manual review and the reservation-release flag while preserving existing local timestamp semantics and financial history.
-- API errors preserve retryable transactions. A server-reported cancellation or failure is handled separately from connection/response errors.
+- Payment creation persists a unique local request before unlocked HTTP, then reloads locked Order/Payment state. Pending sessions are reused; a timeout or unknown response preserves the attempt and blocks blind gateway retries. A UUID in the callback path supports verified correlation and is not a Zibal idempotency key.
+- `payments/0004` adds creation state/local UUID and allows an unknown gateway ID without changing historical amounts, references or payment times. Its reverse guard refuses to erase new request evidence. Apply reviewed migrations before web startup; `MIGRATE_ON_START=0` performs a read-only schema check.
+- Verification errors remain retryable. Creation errors distinguish documented rejection from an uncertain remote outcome. Support can bind an independently obtained track ID using recovery's `--request-id` mode and a fresh checked backup, then inspect all receipts before primary selection.
 - The redirect page sends only the storefront origin as `Referer`, as required by Zibal, including automatic navigation without JavaScript. Global referrer settings and frontend styling stay unchanged.
 - Credentials and card data are never included in the redirect URL, frontend code, stored verification data or error logs.
 
@@ -581,7 +589,7 @@ scripts/compose-production run --rm --no-deps -T db-backup inspect
 scripts/backup-production-db
 ```
 
-Back up before migrations. Apply the two new payment/order migrations once using the reviewed web image and verify readiness before payment recovery. Keep `ZIBAL_PAID_AT_TIMEZONE` empty until Zibal confirms an IANA timezone. Inquiry is read-only by default; recovery apply requires a fresh validated backup and never issues a refund. Production restoration requires explicit human approval and a successful isolated restore test of the selected file.
+Back up before migrations. Apply all reviewed migrations, including `payments/0004`, once using the reviewed web image and verify readiness before payment recovery. Keep `ZIBAL_PAID_AT_TIMEZONE` empty until Zibal confirms an IANA timezone. Inquiry is read-only by default; recovery apply requires a fresh validated backup and never issues a refund. Production restoration requires explicit human approval and a successful isolated restore test of the selected file.
 
 Unpaid-order expiration uses the existing management command through the same wrapper:
 

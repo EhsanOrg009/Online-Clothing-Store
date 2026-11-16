@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import zlib
+from uuid import UUID
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -18,7 +19,7 @@ from orders.models import Order
 from payments.gateways import PaymentGatewayError, get_gateway
 from payments.gateways.zibal import _track_id
 from payments.gateways.zibal_time import confirmed_zone
-from payments.models import Payment
+from payments.models import Payment, PaymentCreationStatus
 from payments.services import (
     PaymentError, classify_receipt, process_callback, potentially_successful_receipt,
     receipt_history_fingerprint, recovery_receipt_snapshot, _authorize_recovery_primary,
@@ -77,7 +78,7 @@ def order_snapshot(order: Order) -> dict:
         "expires_at": order.expires_at, "inventory_released": order.inventory_released,
         "can_pay": order.can_pay,
         "payments": list(order.payments.order_by("created_at", "pk").values(
-            "id", "authority", "gateway", "amount", "status", "reference_id",
+            "id", "authority", "request_id", "creation_status", "gateway", "amount", "status", "reference_id",
             "transaction_id", "callback_count", "order_id", "created_at",
             "verified_at", "paid_at", "gateway_paid_at", "needs_refund",
         )),
@@ -102,6 +103,10 @@ class Command(BaseCommand):
         parser.add_argument("--order-number", required=True)
         parser.add_argument("--track-id", nargs="+", required=True)
         parser.add_argument("--apply", action="store_true")
+        parser.add_argument(
+            "--request-id",
+            help="Resolve one durable creation attempt against one explicit track ID, without fulfillment; then inspect the complete ledger.",
+        )
         parser.add_argument("--backup", help="Fresh .sql.gz plus its .sha256 sidecar, both readable.")
         parser.add_argument(
             "--gateway-timezone",
@@ -136,6 +141,8 @@ class Command(BaseCommand):
             raise CommandError("Order, transaction IDs or Zibal configuration are invalid.") from exc
         if gateway_timezone is not None:
             gateway.paid_at_timezone = gateway_timezone
+        if options.get("request_id"):
+            return self.resolve_creation_request(order, gateway, **options)
         payments = list(order.payments.order_by("created_at", "pk"))
         by_authority = {payment.authority: payment for payment in payments}
         if any(track_id not in by_authority or by_authority[track_id].gateway != "zibal" for track_id in track_ids):
@@ -154,7 +161,19 @@ class Command(BaseCommand):
             report["backup"] = validate_backup(options["backup"], connection.settings_dict["NAME"])
 
         manual = [p for p in payments if p.status == PaymentStatus.MANUAL_REVIEW]
-        potential = {p.authority for p in payments if potentially_successful_receipt(p)}
+        potential = {p.authority for p in payments if p.authority and potentially_successful_receipt(p)}
+        unresolved_creation = [p for p in payments if p.creation_status in (
+            PaymentCreationStatus.REQUESTING, PaymentCreationStatus.UNCERTAIN, PaymentCreationStatus.REVIEW,
+        ) or (not p.authority and (
+            p.creation_status != PaymentCreationStatus.REJECTED or potentially_successful_receipt(p)
+        ))]
+        report["unresolved_creation_requests"] = [
+            {"payment_id": p.pk, "request_id": str(p.request_id) if p.request_id else None,
+             "track_id": p.authority, "creation_status": p.creation_status}
+            for p in unresolved_creation
+        ]
+        if unresolved_creation:
+            report["blocking_issues"].append("Unresolved gateway creation attempts prevent primary selection; validate their track IDs before recovery.")
         report["existing_manual_review_receipts"] = [p.authority for p in manual]
         report["unselected_manual_review_receipts"] = [p.authority for p in manual if p.authority not in track_ids]
         report["historical_non_zibal_receipts"] = [p.authority for p in payments if p.gateway != "zibal"]
@@ -166,7 +185,14 @@ class Command(BaseCommand):
         verified = {}
         for payment in payments:
             payment.order = order
-            evidence = report["gateway"][payment.authority] = {}
+            key = payment.authority or "request:" + str(payment.request_id or payment.pk)
+            evidence = report["gateway"][key] = {}
+            if not payment.authority:
+                evidence["creation_status"] = payment.creation_status
+                evidence["error"] = "Documented request rejection; no remote track ID." if (
+                    payment.creation_status == PaymentCreationStatus.REJECTED
+                ) else "Unknown remote track ID; use --request-id with an independently obtained track ID."
+                continue
             if payment.gateway != "zibal":
                 evidence["error"] = "Historical gateway requires an independent audit."
                 if potentially_successful_receipt(payment):
@@ -336,3 +362,69 @@ class Command(BaseCommand):
         failed_preflight = any(not report["gateway"][track_id].get("verified") for track_id in track_ids)
         if options["apply"] and (report["blocking_issues"] or replay_failures or failed_preflight or selection_blockers):
             raise CommandError("Recovery is incomplete or requires manual review. Read the sanitized report; no receipt was forced successful.")
+
+    def resolve_creation_request(self, order, gateway, **options):
+        """Bind authenticated gateway evidence only; never authorize a primary.
+
+        The request UUID is local correlation, not proof of payment or a gateway
+        idempotency key. A fresh backup is still mandatory for local writes.
+        """
+        if len(options["track_id"]) != 1:
+            raise CommandError("--request-id requires exactly one explicit --track-id; complete primary recovery is a separate preflight.")
+        try:
+            request_id = UUID(options["request_id"])
+            payment = order.payments.get(request_id=request_id, gateway="zibal")
+        except (ValueError, TypeError, Payment.DoesNotExist) as exc:
+            raise CommandError("Creation request must belong to this order and Zibal.") from exc
+        track_id = options["track_id"][0]
+        if payment.authority not in (None, track_id) or Payment.objects.exclude(pk=payment.pk).filter(authority=track_id).exists():
+            raise CommandError("Track ID is already linked to a different attempt; no evidence was overwritten.")
+        if payment.amount != order.total:
+            raise CommandError("Local attempt and order amounts differ; no binding was authorized.")
+        report = {"mode": "resolve_request_apply" if options["apply"] else "resolve_request_inspect",
+                  "before": order_snapshot(order), "request_id": str(request_id), "track_id": track_id,
+                  "fulfillment_authorized": False, "refund_execution": "No refund was requested or performed."}
+        if options["apply"]:
+            if not options.get("backup"):
+                raise CommandError("--apply requires --backup and its recorded .sha256; no records changed.")
+            report["backup"] = validate_backup(options["backup"], connection.settings_dict["NAME"])
+        payment.order = order
+        original_authority = payment.authority
+        payment.authority = track_id  # An in-memory Inquiry candidate, never a write.
+        try:
+            data = gateway._post("/v1/inquiry", {"merchant": gateway.merchant, "trackId": _track_id(track_id)})
+            if data["result"] != 100:
+                raise gateway._api_error(data["result"])
+            status = gateway._check_details(payment, data)
+            if status == 1:
+                result = gateway._verified_result(payment, data, 100)
+                if payment.reference_id and payment.reference_id != result.reference_id:
+                    raise PaymentGatewayError("Recorded reference differs from Inquiry evidence.")
+            report["inquiry"] = {"result": 100, "status": status, "amount_matches": True,
+                                 "order_matches": True, "track_id": track_id}
+        except PaymentGatewayError as exc:
+            raise CommandError("Creation Inquiry failed validation; the attempt remains unresolved.") from exc
+        payment.authority = original_authority
+        plan = {"payment_id": payment.pk, "request_id": str(request_id), "track_id": track_id,
+                "order_id": order.pk, "inquiry": report["inquiry"], "allow_fulfillment": False,
+                "backup_sha256": report.get("backup", {}).get("sha256")}
+        report["creation_resolution_plan"] = plan
+        if options["apply"]:
+            try:
+                payment = process_callback(
+                    payment, {"success": "1", "status": "2", "trackId": track_id,
+                              "orderId": order.order_number, "request_id": str(request_id)},
+                    gateway_timezone=options.get("gateway_timezone"), allow_fulfillment=False,
+                    recovery_audit={"source": "reconcile_zibal_payment_request", "creation_resolution_plan": plan,
+                                    "backup_sha256": report["backup"]["sha256"],
+                                    "backup_file": Path(report["backup"]["file"]).name},
+                )
+            except PaymentError as exc:
+                raise CommandError("Creation resolution is incomplete; retry after reviewing gateway evidence.") from exc
+            report["resolved"] = payment.authority == track_id and payment.creation_status == PaymentCreationStatus.READY
+        order.refresh_from_db()
+        report["after"] = order_snapshot(order)
+        report["next_step"] = "Inspect all order track IDs without --request-id; primary selection still requires complete validated recovery."
+        self.stdout.write(json.dumps(report, default=str, ensure_ascii=False, indent=2))
+        if options["apply"] and not report["resolved"]:
+            raise CommandError("Creation evidence requires manual review; no primary was authorized.")

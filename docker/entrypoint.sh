@@ -95,6 +95,9 @@ fi
 if [ "$MIGRATE_ON_START" = "1" ]; then
   log "اجرای Migration..."
   python manage.py migrate --noinput
+else
+  log "بررسی خواندنی سازگاری schema؛ migration باید قبلاً اعمال شده باشد..."
+  python manage.py migrate --check --noinput
 fi
 
 # ---------------------------------------------------------------------

@@ -14,6 +14,14 @@ from orders.choices import PaymentStatus
 from orders.models import Order
 
 
+class PaymentCreationStatus(models.TextChoices):
+    REQUESTING = "requesting", _("در انتظار پاسخ ایجاد درگاه")
+    READY = "ready", _("شناسهٔ درگاه ثبت شده")
+    UNCERTAIN = "uncertain", _("نتیجهٔ ایجاد نامشخص؛ نیازمند بررسی")
+    REJECTED = "rejected", _("درخواست ایجاد رد شده")
+    REVIEW = "review", _("ایجاد نیازمند بررسی پشتیبانی")
+
+
 class Payment(models.Model):
     """یک تلاش پرداخت برای یک سفارش."""
 
@@ -39,7 +47,17 @@ class Payment(models.Model):
         max_length=64,
         unique=True,
         db_index=True,
+        null=True,
+        blank=True,
         help_text=_("توکن یکتایی که درگاه هنگام ایجاد تراکنش برمی‌گرداند."),
+    )
+    request_id = models.UUIDField(
+        _("شناسهٔ درخواست محلی"), unique=True, null=True, blank=True, editable=False,
+        help_text=_("برای اتصال پاسخ/بازگشت به تلاش ثبت‌شده؛ کلید idempotency زیبال نیست."),
+    )
+    creation_status = models.CharField(
+        _("وضعیت ایجاد درگاه"), max_length=20, choices=PaymentCreationStatus.choices,
+        default=PaymentCreationStatus.READY, db_index=True, editable=False,
     )
     transaction_id = models.CharField(
         _("شناسه تراکنش"), max_length=64, blank=True, db_index=True

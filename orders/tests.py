@@ -2,6 +2,7 @@
 
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 from django.conf import settings
 from django.test import TestCase
@@ -489,7 +490,9 @@ class OrderAdminTests(OrderFixtureMixin, TestCase):
         obj.tracking_number = "TRK-TEST-123"
         obj.customer_note = "یادداشت ادمین"
         obj.status = OrderStatus.PREPARING
-        admin_instance.save_model(request, obj, form=None, change=True)
+        admin_instance.save_model(request, obj, form=SimpleNamespace(
+            changed_data=["status", "tracking_number", "customer_note"],
+        ), change=True)
 
         self.order.refresh_from_db()
         # هم وضعیت تغییر کرده و هم فیلدهای دیگر حفظ شده‌اند (باگ قبلی: دور ریخته می‌شدند)
@@ -508,9 +511,63 @@ class OrderAdminTests(OrderFixtureMixin, TestCase):
         request = self._admin_request()
         obj = Order.objects.get(pk=self.order.pk)
         obj.status = OrderStatus.CANCELLED
-        admin_instance.save_model(request, obj, form=None, change=True)
+        admin_instance.save_model(request, obj, form=SimpleNamespace(changed_data=["status"]), change=True)
 
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, OrderStatus.CANCELLED)
         self.variant.refresh_from_db()
         self.assertEqual(self.variant.stock, 5)  # موجودی آزاد شد
+
+    def test_stale_admin_form_cannot_overwrite_payment_finalized_after_form_loaded(self):
+        from django.contrib.admin.sites import AdminSite
+        from orders.admin import OrderAdmin
+        obj = Order.objects.get(pk=self.order.pk)
+        obj.tracking_number = "TRK-AUTHORITATIVE"
+        mark_order_paid(self.order)
+        paid_at = self.order.paid_at
+        OrderAdmin(Order, AdminSite()).save_model(
+            self._admin_request(), obj, SimpleNamespace(changed_data=["tracking_number"]), change=True,
+        )
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.PAID)
+        self.assertTrue(self.order.is_paid)
+        self.assertEqual(self.order.paid_at, paid_at)
+        self.assertIsNone(self.order.expires_at)
+        self.assertEqual(self.order.tracking_number, "TRK-AUTHORITATIVE")
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 3)
+
+    def test_stale_admin_form_cannot_revive_expired_order_or_undo_inventory_release(self):
+        from django.contrib.admin.sites import AdminSite
+        from orders.admin import OrderAdmin
+        obj = Order.objects.get(pk=self.order.pk)
+        obj.customer_note = "یادداشت پس از انقضا"
+        Order.objects.filter(pk=self.order.pk).update(expires_at=timezone.now() - timedelta(minutes=1))
+        self.assertEqual(expire_due_orders(), 1)
+        OrderAdmin(Order, AdminSite()).save_model(
+            self._admin_request(), obj, SimpleNamespace(changed_data=["customer_note"]), change=True,
+        )
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.CANCELLED)
+        self.assertEqual(self.order.payment_status, PaymentStatus.EXPIRED)
+        self.assertTrue(self.order.inventory_released)
+        self.assertEqual(expire_due_orders(), 0)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 5)
+
+    def test_admin_save_ignores_financial_fields_and_cannot_reintroduce_paid_deadline(self):
+        from django.contrib.admin.sites import AdminSite
+        from orders.admin import OrderAdmin
+        obj = Order.objects.get(pk=self.order.pk)
+        obj.total = Decimal(1)
+        obj.payment_status = PaymentStatus.FAILED
+        obj.expires_at = timezone.now() + timedelta(hours=1)
+        mark_order_paid(self.order)
+        total = self.order.total
+        OrderAdmin(Order, AdminSite()).save_model(
+            self._admin_request(), obj, SimpleNamespace(changed_data=["total", "payment_status", "expires_at"]), change=True,
+        )
+        self.order.refresh_from_db()
+        self.assertTrue(self.order.is_paid)
+        self.assertEqual(self.order.total, total)
+        self.assertIsNone(self.order.expires_at)

@@ -91,7 +91,7 @@ scripts/backup-production-db
 scripts/compose-production stop web db-backup
 ```
 
-Migration در هر deploy خودکار نیست. با تصویر بررسی‌شده، plan را بررسی و migration را یک‌بار اجرا کنید؛ وب و scheduler پس از آن شروع می‌شوند:
+Migration در هر deploy خودکار نیست. با تصویر بررسی‌شده، plan را بررسی و migration را یک‌بار اجرا کنید؛ وب و scheduler پس از آن شروع می‌شوند. نسخهٔ ایجاد پایدار پرداخت به `payments/0004_payment_creation_status_payment_request_id_and_more` نیاز دارد و اطلاعات مالی قبلی را تغییر نمی‌دهد. برگشت این migration پس از ثبت درخواست‌های جدید، برای حفظ شواهد عمداً متوقف می‌شود؛ rollback schema ابزار رفع خطای پرداخت نیست:
 
 ```sh
 scripts/compose-production run --rm --no-deps -T --entrypoint python web manage.py migrate --plan
@@ -101,6 +101,8 @@ scripts/compose-production ps
 scripts/compose-production logs --tail=200 web nginx db db-backup
 scripts/compose-production exec web python manage.py check --deploy
 ```
+
+با `MIGRATE_ON_START=0`، entrypoint قبل از شروع Gunicorn، `python manage.py migrate --check --noinput` را اجرا می‌کند. این کنترل فقط خواندنی است؛ migration معوق یا خطای بررسی، شروع وب را متوقف می‌کند و migration خودکار اجرا نمی‌شود. فرمان‌های migration بالا با `--entrypoint python` مستقیماً عملیات بررسی‌شده را اجرا می‌کنند؛ guard برای شروع معمول وب است. در failure، علت را با حفظ بکاپ و writerهای متوقف بررسی کنید؛ migration مالی معکوس یا بازسازی DB خودکار مجاز نیست.
 
 در نصب تازه، پس از migration، کل stack از جمله Nginx را شروع کنید. در سرور موجود، فرمان بالا DB و Redis موجود را recreate نمی‌کند؛ reload یا راه‌اندازی Nginx را متناسب با آرایش واقعی سرور بازبینی کنید:
 

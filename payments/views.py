@@ -14,7 +14,7 @@ from orders.models import Order
 
 from .gateways import PaymentGatewayError, get_gateway
 from .gateways.zibal import parse_callback
-from .models import Payment
+from .models import Payment, PaymentCreationStatus
 from .services import PaymentError, process_callback
 
 
@@ -40,6 +40,16 @@ def payment_redirect(request, pk: int):
     if not payment.is_pending:
         return _result_redirect(payment)
 
+    if (
+        not payment.order.can_pay or payment.creation_status != PaymentCreationStatus.READY
+        or payment.order.payments.filter(status=PaymentStatus.MANUAL_REVIEW).exists()
+        or payment.order.payments.exclude(pk=payment.pk).filter(creation_status__in=[
+            PaymentCreationStatus.REQUESTING, PaymentCreationStatus.UNCERTAIN, PaymentCreationStatus.REVIEW,
+        ]).exists()
+    ):
+        messages.warning(request, _("پرداخت این سفارش اکنون مجاز نیست؛ در صورت ابهام با پشتیبانی تماس بگیرید."))
+        return redirect("orders:detail", order_number=payment.order.order_number)
+
     try:
         gateway = get_gateway(payment.gateway)
         redirect_url = gateway.get_payment_url(payment)
@@ -64,7 +74,7 @@ def payment_redirect(request, pk: int):
 # Callback درگاه (بدون نیاز به Login)
 # ---------------------------------------------------------------------
 @require_GET
-def payment_callback(request):
+def payment_callback(request, request_id=None):
     """
     دریافت بازگشت کاربر از درگاه.
 
@@ -77,11 +87,18 @@ def payment_callback(request):
         messages.error(request, _("درخواست پرداخت نامعتبر است."))
         return redirect("store:home")
 
+    if request_id is not None:
+        callback_data["request_id"] = str(request_id)
+
     payment = (
         Payment.objects.select_related("order").filter(
             gateway="zibal", authority=callback_data["trackId"]
         ).first()
     )
+    if payment is None and request_id is not None:
+        payment = Payment.objects.select_related("order").filter(
+            gateway="zibal", request_id=request_id, authority__isnull=True,
+        ).first()
     if payment is None:
         messages.error(request, _("تراکنش موردنظر یافت نشد."))
         return redirect("store:home")

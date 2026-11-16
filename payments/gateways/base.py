@@ -22,6 +22,14 @@ class PaymentGatewayError(Exception):
     """خطای سطح درگاه پرداخت."""
 
 
+class PaymentRequestRejected(PaymentGatewayError):
+    """A documented gateway rejection, distinct from an uncertain HTTP outcome."""
+
+    def __init__(self, message, *, code):
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class PaymentRequest:
     """نتیجه ایجاد تراکنش: توکن و آدرس صفحه پرداخت درگاه."""
@@ -50,7 +58,7 @@ class PaymentGateway(ABC):
     name: str = "base"
 
     @abstractmethod
-    def create_payment(self, order, request=None) -> PaymentRequest:
+    def create_payment(self, order, request=None, *, request_id=None) -> PaymentRequest:
         """ایجاد تراکنش نزد درگاه و دریافت شناسه + آدرس پرداخت."""
 
     @abstractmethod

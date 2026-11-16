@@ -248,6 +248,8 @@ SHA256 و gzip سالم فقط سلامت فایل را ثابت می‌کنند
 
 این driver همهٔ عملیات stack را با `scripts/compose-production` و project یکتا انجام می‌دهد؛ target restore کانتینر QA مستقل با data tmpfs است. جدول‌های Django، مقادیر نمونه، routine، trigger و event پس از SQL import بررسی می‌شوند. پاکسازی فقط کانتینرها/شبکه‌های همان QA است؛ هیچ Docker volume حذف نمی‌شود. artifacts خصوصی فقط synthetic data دارند و به سرویس بیرونی upload نمی‌شوند. این تست، restore **فایل واقعی production** نیست.
 
+در تست ظرفیت، scheduler همان project آزمایشی موقتاً متوقف می‌شود تا tick نیم‌ساعته، نمونه‌های eligible را بین dry-run و apply تغییر ندهد؛ سپس برای تست lock، restart و recovery دوباره شروع می‌شود. این توقف فقط در harness آزمایشی است و سیاست یا زمان‌بندی production را تغییر نمی‌دهد. شکست فرمان و assertion با traceback و انتهای خروجیِ دارای credential حذف‌شده گزارش می‌شود؛ فایل محیط و SQL خصوصی upload نمی‌شوند. بررسی واقعی `migrate --check` نیز پیش و پس از migration دیتابیس مصنوعی اجرا می‌شود.
+
 برای restore یک بکاپ واقعی روی همان Docker host، target و شبکهٔ کاملاً مستقل بسازید و فقط backup را read-only mount کنید. منابع RAM/disk متناسب با اندازهٔ اندازه‌گیری‌شده لازم‌اند. مثال زیر باید روی محیط آزمایشی بازبینی‌شده اجرا شود؛ DB target هیچ اتصال به شبکهٔ production ندارد:
 
 ```sh

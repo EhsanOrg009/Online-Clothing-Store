@@ -16,7 +16,9 @@ from django.urls import reverse
 
 from orders.choices import PaymentStatus
 
-from .base import PaymentGateway, PaymentGatewayError, PaymentRequest, VerificationResult
+from .base import (
+    PaymentGateway, PaymentGatewayError, PaymentRequest, PaymentRequestRejected, VerificationResult,
+)
 from .zibal_time import parse_gateway_paid_at
 
 
@@ -131,7 +133,8 @@ class ZibalGateway(PaymentGateway):
         message = _ERROR_MESSAGES.get(result, "درخواست زیبال با خطا مواجه شد.")
         return PaymentGatewayError(f"{message} (کد {result})")
 
-    def create_payment(self, order, request=None) -> PaymentRequest:
+    def payment_request_payload(self, order, *, request_id=None):
+        """Validate locally before persisting an attempt; never performs HTTP."""
         origin = urlsplit(settings.SITE_URL)
         if (
             origin.scheme not in ("http", "https")
@@ -143,18 +146,24 @@ class ZibalGateway(PaymentGateway):
             or (not settings.DEBUG and origin.scheme != "https")
         ):
             raise PaymentGatewayError("SITE_URL برای بازگشت از زیبال نامعتبر است.")
-        data = self._post(
-            "/v1/request",
-            {
-                "merchant": self.merchant,
-                "amount": self._amount_in_rials(order.total),
-                "callbackUrl": settings.SITE_URL.rstrip("/") + reverse("payments:callback"),
-                "orderId": order.order_number,
-                "description": f"پرداخت سفارش {order.order_number}",
-                "mobile": order.customer.phone_number,
-            },
+        callback_path = (
+            reverse("payments:callback_request", kwargs={"request_id": request_id})
+            if request_id else reverse("payments:callback")
         )
+        return {
+            "merchant": self.merchant,
+            "amount": self._amount_in_rials(order.total),
+            "callbackUrl": settings.SITE_URL.rstrip("/") + callback_path,
+            "orderId": order.order_number,
+            "description": f"پرداخت سفارش {order.order_number}",
+            "mobile": order.customer.phone_number,
+        }
+
+    def create_payment(self, order, request=None, *, request_id=None) -> PaymentRequest:
+        data = self._post("/v1/request", self.payment_request_payload(order, request_id=request_id))
         if data["result"] != 100:
+            if data["result"] in {102, 103, 104, 105, 106, 112, 113, 115, 140} and not data.get("trackId"):
+                raise PaymentRequestRejected(str(self._api_error(data["result"])), code=data["result"])
             raise self._api_error(data["result"])
         track_id = str(_track_id(data.get("trackId")))
         return PaymentRequest(

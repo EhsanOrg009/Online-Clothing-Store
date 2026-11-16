@@ -197,7 +197,7 @@ class PaymentDeadlineTests(fixtures.PaymentFixtureMixin, fixtures.PaymentTestCas
         self.assertEqual(self.variant.stock, 5)
 
     def test_naive_additional_payment_is_reviewed_without_refund_decision(self):
-        other = self.start_payment()
+        other = self.historical_payment()
         process_callback(other, self.callback_data(other))
         self.set_time("2026-11-14T10:28:00")
         payment = self.pay()
