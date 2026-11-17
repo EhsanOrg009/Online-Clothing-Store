@@ -1,20 +1,61 @@
 # بازیابی امن پرداخت زیبال
 
-این runbook اصلاحات هدفمند پس از `45d5a5d0aa99022e00a13455925d7e69709d4fc0` را توضیح می‌دهد. کد و آزمون‌ها محلی آماده شده‌اند؛ اجرای فرمان‌های production، migration، recovery یا refund در این کار انجام نشده است. [قرارداد پرداخت و timezone](zibal-payment.md) و [عملیات بکاپ Docker](production-database-backups.md) را پیش از اجرا بخوانید.
+این runbook بازیابی با حفظ رسید و شواهد قبلی را توضیح می‌دهد. کد و آزمون‌ها محلی آماده شده‌اند؛ اجرای فرمان‌های production، migration، recovery یا refund در این کار انجام نشده است. [قرارداد پرداخت و timezone](zibal-payment.md)، [گزارش تراکنش ۷](zibal-manual-review-incident.md) و [عملیات بکاپ Docker](production-database-backups.md) را پیش از اجرا بخوانید.
 
-## علت حادثه و وضعیت شواهد
+## تراکنش ۷، سفارش ۳: علت ثبت‌شده و مسیر بعدی
+
+شواهد پالایش‌شدهٔ گزارش read-only مالک برای این حادثه: Verify با `result=100` و `verify_result=100`، وضعیت درگاه `1` و `paidAt=2026-11-16T18:03:02.136000`. زمان بدون offset است؛ `metadata.verification.payment_time.reason` و `metadata.decision.reason` برابر `timezone_unconfirmed` هستند، source/timezone خالی‌اند و `gateway_paid_at=NULL` است. رسید `manual_review`، ایجاد `ready` و `needs_refund=False` است؛ مبلغ ریالی، order ID و مرجع قبلی مطابق گزارش مالک تطبیق دارند. این شواهد از production توسط این کار محلی دوباره خوانده نشده‌اند.
+
+این رسید نباید با تلاش failed/pending عادی یا حادثهٔ قدیمی شمارهٔ مرجع اشتباه گرفته شود. `paid_at` و `verified_at` زمان‌های محلی ثبت/بررسی‌اند و timezone درگاه را اثبات نمی‌کنند. در مسیر فعلی، `verify_result=100` پاسخ مستقیم Verify را نشان می‌دهد؛ Inquiry برای نتیجهٔ ۲۰۱/۲۰۲ لازم است. علت مستقیم ثبت‌شدهٔ بررسی دستی معلوم است، اما پذیرش بعدی همچنان deadline، رزرو، وضعیت سفارش، همهٔ رسیدهای همان سفارش و هویت رسید را بازبینی می‌کند.
+
+مقایسهٔ قبلی `trackId` با `authority` به‌صورت «MISMATCH» گزارش شد؛ وجود کلید و نوع مقدار هنوز مشخص نشده است. `authority` همان track ID زیبال با نوع رشته است. schema پاسخ Verify/Inquiry الزاماً این کلید را برنمی‌گرداند؛ نبود کلید یا مقایسهٔ عدد JSON با رشته اختلاف واقعی را ثابت نمی‌کند. اگر کلید حاضر و واقعاً متفاوت باشد، بازیابی متوقف می‌شود؛ authority نباید برای تطبیق بازنویسی شود.
+
+برای بررسی خصوصی **فقط شواهد ذخیره‌شده**، در محیط مجازِ دارای نسخهٔ جدید:
+
+```sh
+python manage.py inspect_zibal_payment --payment-id 7
+```
+
+این command هیچ تماس درگاه یا DB write ندارد؛ شناسهٔ پذیرنده، کارت، مشتری، authority، UUID و payload کامل را چاپ نمی‌کند. تنها وجود/نوع `trackId`، تطبیق عددی و دلایل whitelisted گزارش می‌شوند:
+
+| `verification.track_id_comparison` | تفسیر |
+| --- | --- |
+| `not_returned` | کلید در پاسخ ذخیره‌شده نیست؛ اختلاف شناسه محسوب نمی‌شود |
+| `matched` | شناسهٔ معتبر، پس از لحاظ نوع عدد/رشته، همان authority است |
+| `mismatch` | اختلاف واقعی؛ بدون تغییر شناسه یا پذیرش، بررسی مستقل لازم است |
+| `invalid` | کلید حاضر ولی مقدار یا authority نامعتبر است؛ بررسی مستقل لازم است |
+
+تا زمان پاسخ رسمی، تنظیم `ZIBAL_PAID_AT_TIMEZONE` خالی، رسید در بررسی دستی و پرداخت تازه ممنوع می‌ماند. متن پیشنهادی برای ارسال **توسط پذیرنده** به پشتیبانی زیبال:
+
+> در پاسخ productionِ `/v1/verify` برای یک پرداخت تأییدشده، `paidAt` به صورت `2026-11-16T18:03:02.136000` و بدون `Z` یا offset دریافت شده است. timezone دقیق این مقادیر چیست و نام IANA تضمین‌شدهٔ آن کدام است؟ آیا `/v1/inquiry` دقیقاً همان قرارداد زمانی را دارد؟ آیا این تضمین برای پاسخ‌های تاریخی و تغییرات DST نیز برقرار است؟ آیا می‌توان پاسخ RFC3339 دارای `Z` یا offset صریح دریافت کرد و روش درخواست آن چیست؟ لطفاً پاسخ کتبی یا لینک قرارداد رسمی را ارائه کنید؛ حدس بر اساس محل پذیرنده یا timezone سرور برای کنترل deadline پرداخت کافی نیست.
+
+ارسال پرسش، تماس با زیبال و هیچ Inquiry/Verify واقعی در این کار انجام نشده‌اند. `Asia/Tehran` در آزمون‌ها صرفاً تأیید مصنوعی است.
+
+پس از رفع ابهام شناسه و دریافت پاسخ رسمی، مسئول production این مسیر را جداگانه بازبینی می‌کند:
+
+1. شمارهٔ واقعی `Order.order_number` برای Order ID 3 و authority **موجود** Payment ID 7 را خصوصی بردارد. اگر رسید بالقوه موفق دیگری برای همان سفارش هست، همه را بررسی و صریحاً انتخاب کند؛ رسیدهای سفارش قدیمی به این پرونده اضافه نشوند.
+2. منبع، تاریخ و محدودهٔ تضمین timezone را ثبت کند. حالت بدون `--apply` فرمان `reconcile_zibal_payments`، برخلاف command شواهد ذخیره‌شده، **Inquiry واقعی** انجام می‌دهد و عملیات جداگانهٔ محیط مجاز است.
+3. قبل از apply، بکاپ SQL تازهٔ حداکثر یک‌ساعته، sidecar SHA256 ثبت‌شده، صحت کامل gzip/SQL و قفل حفاظت بکاپ را طبق بخش پایین بررسی کند. checksum تازهٔ بدون sidecar قبلی یا بکاپ کهنه کافی نیست.
+4. با همان track ID و همهٔ کنترل‌های فرمان، reverify کند. نمونهٔ زیر placeholder دارد و دستور اجرایی آمادهٔ production نیست:
+
+   ```sh
+   python manage.py reconcile_zibal_payments \
+     --order-number ORDER_NUMBER_FOR_ID_3 \
+     --track-id EXISTING_TRACK_ID_FOR_PAYMENT_7 \
+     --gateway-timezone OFFICIALLY_CONFIRMED_IANA_ZONE
+   # فقط پس از بازبینی Inquiry و بکاپ معتبر، همان فرمان با این دو گزینه:
+   # --apply --backup /READ_ONLY_BACKUP_PATH/FRESH_BACKUP.sql.gz
+   ```
+
+5. نتیجهٔ replay، `actual_primary`، تصمیم ثبت‌شده، `needs_refund`، وضعیت سفارش، رزرو و audit را بررسی کند. فقط اگر receipt و وضعیت فعلی سفارش معتبر باشند، پذیرش یک بار انجام می‌شود؛ لغو قبلی، موجودی آزادشده یا deadline نامنطبق با تنظیم timezone دور زده نمی‌شوند.
+
+برای این رسید با `creation_status=ready` و authority موجود، اتصال دوباره با `--request-id`، تعویض Payment، درخواست `/v1/request` تازه یا تغییر مستقیم SQL لازم و مجاز نیست. Payment ID، مبلغ، authority، UUID، مرجع، `paid_at` اولیه، raw `paidAt` و تاریخچهٔ verification/decision/recovery حفظ می‌شوند. بررسی دستی به‌تنهایی دلیل refund نیست.
+
+## سابقهٔ حادثهٔ قدیمی شمارهٔ مرجع
 
 اعتبارسنجی قدیمی `refNumber` تنها integer را قبول می‌کرد. numeric string واقعی باعث خطای «شماره مرجع گزارش زیبال نامعتبر است.» و rollback محلی callback می‌شد. اصلاح رشتهٔ ASCII مثبت و حفظ صفرهای ابتدایی باقی مانده است. بازبینی بعدی دو خطر مستقل را پوشش می‌دهد: مقایسهٔ زمان ورود callback با deadline، و آزادسازی موجودی همزمان با تأیید پرداخت.
 
-شواهد زیر **از گزارش مالک** هستند و در این محیط از زیبال دوباره inquiry نشده‌اند:
-
-| سفارش | Track ID | شواهد گزارش‌شده |
-| --- | --- | --- |
-| `ORD-20261114-9BQ4H2` | `4911955398` | `result=100`، `status=1`، مبلغ و سفارش منطبق، reference رشته‌ای معتبر، `paidAt` موجود |
-| همان سفارش | `4911974825` | همان شرایط |
-| همان سفارش | `4911986194` | همان شرایط |
-
-وضعیت فعلی production، مقدار واقعی `paidAt`، reference، موجودی و primary هنوز باید در سرور خوانده شوند. صرف وجود `paidAt` به معنای timezone مشخص نیست. با نبود تأیید رسمی timezone، زمان‌های بدون offset همگی manual review هستند؛ حتی اگر هر سه timestamp در یک قالب naive باشند، روی «ساعت API» مرتب و پذیرفته نمی‌شوند.
+مالک پیش‌تر سه رسید موفقِ منطبق برای یک سفارش قدیمی، با reference رشته‌ای معتبر و `paidAt` موجود گزارش کرده بود. این پرونده متعلق به Payment 7 / Order 3 نیست و استعلام تازه‌ای برای آن انجام نشده است. شناسه‌ها از مثال‌های اجرایی حذف شده‌اند تا بازیابی سفارش جدید با پروندهٔ قبلی مخلوط نشود. صرف وجود `paidAt` به معنای timezone مشخص نیست؛ چند timestamp بدون offset نیز با مرتب‌سازی روی «ساعت API» قابل پذیرش نیستند.
 
 ## حالت پیش‌فرض: Inquiry بدون تغییر دیتابیس
 
@@ -22,8 +63,8 @@
 
 ```sh
 scripts/compose-production exec -T web python manage.py reconcile_zibal_payments \
-  --order-number ORD-20261114-9BQ4H2 \
-  --track-id 4911955398 4911974825 4911986194
+  --order-number ORDER_NUMBER \
+  --track-id EXISTING_TRACK_ID
 ```
 
 فرمان بدون `--apply` فقط Query محلی و `/v1/inquiry` خواندنی انجام می‌دهد. Verify، ساخت payment، تغییر callback count، تغییر موجودی یا refund ندارد. تمام تلاش‌های پرداخت همان سفارش بررسی می‌شوند؛ شناسه‌های انتخابی باید صریح، یکتا، معتبر و متعلق به همان سفارش باشند.
@@ -48,7 +89,7 @@ raw timestamp خراب که احتمالاً متن دلخواه یا object ب�
 
 اگر replay primary timeout یا شکست بخورد، سایر رسیدهای زودهنگام به‌عنوان primary جایگزین نمی‌شوند؛ شواهد موفقشان در manual review می‌ماند. retry معتبر همان primary را یک بار نهایی و رسیدهای اضافه را برای refund handling علامت می‌زند. اگر بین preview و replay timestamp مبهم شود یا انقضا زودتر قفل بگیرد، fulfillment متوقف می‌شود. نتیجهٔ جزئی یا نیازمند review با گزارش روشن و exit غیرصفر برمی‌گردد؛ تکرار فرمان موفقیت‌های قبلی را دوباره اعمال نمی‌کند.
 
-`metadata.recovery_history` شامل منبع فرمان، SHA256 بکاپ، نام بکاپ، شناسه‌های انتخابی، primary برنامه‌ریزی‌شده و زمان مشاهده است. `verification_history`، raw `paidAt` و `decision` نیز حفظ می‌شوند. callback تکراری رسیدی که قبلاً successful شده فقط شمارنده را افزایش می‌دهد و رسید/fulfillment را بازنویسی نمی‌کند.
+`metadata.recovery_history` شامل منبع فرمان، SHA256 بکاپ، نام بکاپ، شناسه‌های انتخابی، primary برنامه‌ریزی‌شده و زمان مشاهده است. `verification_history` و raw `paidAt` حفظ می‌شوند؛ `decision_history` نیز تصمیم قبلی را قبل از تغییر `decision` آرشیو می‌کند. علت تعارض یا زمان آینده در تاریخچه، حتی اگر آخرین تصمیم فقط timezone review باشد، انتخاب primary و پذیرش خودکار را متوقف می‌کند. callback تکراری رسیدی که قبلاً successful شده فقط شمارنده را افزایش می‌دهد و رسید/fulfillment را بازنویسی نمی‌کند.
 
 ## رسیدهای حل‌نشده و مجوز محدود primary
 
@@ -95,7 +136,7 @@ basename داخل sidecar باید با فایل انتخابی تطبیق کن�
 
 ## آماده‌سازی production با حفظ تنظیمات
 
-این مراحل نیازمند بازبینی و اجازهٔ مسئول production هستند؛ در این کار اجرا نشده‌اند. در `/root/Online-Clothing-Store` وضعیت را ثبت کنید:
+این بخش، دستورالعمل عمومی استقرار نسخه‌های قدیمی‌تر نیز بوده است. طبق گزارش مالک، migrationهای پرداخت در production اعمال و سرویس وب بازسازی شده و healthy است؛ این وضعیت در این کار مستقیماً بررسی نشده است. اصلاح حاضر migration تازه ندارد. بخش build/provision/migrate زیر نباید صرفاً برای تراکنش ۷ دوباره اجرا شود؛ هر استقرار بعدی نیازمند بازبینی وضعیت واقعی و اجازهٔ مستقل مسئول production است و در این کار انجام نشده است. در محیط production مجاز، وضعیت را ثبت کنید:
 
 ```sh
 git status --short --branch
@@ -135,7 +176,7 @@ scripts/compose-production logs --tail=100 db-backup
 scripts/compose-production exec -T web python manage.py check --deploy
 ```
 
-توقف کنترل‌شدهٔ نویسنده‌ها و reload Nginx باید متناسب با آرایش واقعی سرور بازبینی شوند. `up` عمومی در استقرار معمول سرویس بکاپ را هم شامل می‌شود؛ نیازی به project یا دیتابیس مستقل نیست. این migrationها لازم‌اند؛ روی parent `dcd8d9e` فقط `payments/0004` تازه است:
+توقف کنترل‌شدهٔ نویسنده‌ها و reload Nginx باید متناسب با آرایش واقعی سرور بازبینی شوند. `up` عمومی در استقرار معمول سرویس بکاپ را هم شامل می‌شود؛ نیازی به project یا دیتابیس مستقل نیست. این migrationها پیش‌نیاز نسخه‌اند و طبق گزارش مالک قبلاً اعمال شده‌اند؛ بدون migration معوق، اجرای دوباره لازم نیست:
 
 ```text
 orders/0002_order_inventory_released_alter_order_payment_status
@@ -155,8 +196,8 @@ chmod 600 "$recovery_report"
 scripts/compose-production run --rm --no-deps -T --user 0:0 --entrypoint python \
   --volume "$BACKUP_HOST_DIR:/run/minikandoo-backups:ro" \
   web manage.py reconcile_zibal_payments \
-  --order-number ORD-20261114-9BQ4H2 \
-  --track-id 4911955398 4911974825 4911986194 \
+  --order-number ORDER_NUMBER \
+  --track-id EXISTING_TRACK_ID \
   --apply --backup "/run/minikandoo-backups/$BACKUP_NAME" \
   > "$recovery_report"
 ```
@@ -178,7 +219,7 @@ PYTHONPATH=scripts/qa .venv/bin/python manage.py test --settings=shop_test_setti
 .venv/bin/python scripts/qa/test_backup_stack.py
 ```
 
-فعال‌شدن workflow در GitHub با افزودن فایل CI، به معنی موفقیت اجرای CI نیست؛ نتیجهٔ runner باید جداگانه بررسی شود. push و commit نهایی در گزارش تحویل ثبت می‌شوند. سرور production، سه تراکنش واقعی، historical backup واقعی و فعال‌بودن `db-backup` هنوز در این محیط تأیید نشده‌اند.
+نتایج اجرای همین تغییرات، شامل SQLite و MariaDB 11.4.13 جداگانه، در [گزارش تحویل](zibal-manual-review-incident.md#آزمونها-و-حدود-اعتبار) ثبت شده‌اند. همهٔ پاسخ‌های زیبال mock هستند؛ موفقیت این آزمون‌ها اثبات Verify یک پرداخت زنده نیست. هیچ workflow تازه، push یا استقرار انجام نشده و بکاپ واقعی production و سرویس آن مستقیماً بررسی نشده‌اند.
 
 ## refund و حل موارد دستی
 

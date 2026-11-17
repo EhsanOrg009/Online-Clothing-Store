@@ -17,6 +17,7 @@
       {% if dashboard.total_sales != None %}
         <div class="shop-stat"><span class="shop-stat-icon">{% include 'partials/icon.html' with kind='tag' %}</span><h3>مجموع فروش پرداخت‌شده</h3><p>{{ dashboard.total_sales|currency }}</p><p class="shop-stat-cap">{{ dashboard.paid_orders|fa_num }} سفارش پرداخت‌شده</p></div>
         <div class="shop-stat"><span class="shop-stat-icon">{% include 'partials/icon.html' with kind='clock' %}</span><h3>در انتظار پرداخت</h3><p>{{ dashboard.pending_payment_orders|fa_num }}</p></div>
+        <div class="shop-stat"><span class="shop-stat-icon">{% include 'partials/icon.html' with kind='clock' %}</span><h3>نیازمند بررسی پشتیبانی</h3><p>{{ dashboard.manual_review_orders|fa_num }}</p></div>
         <div class="shop-stat"><span class="shop-stat-icon">{% include 'partials/icon.html' with kind='truck' %}</span><h3>سفارش‌های ارسال‌شده و تحویل‌شده</h3><p>{{ dashboard.shipped_orders|fa_num }}</p></div>
       {% endif %}
       {% if dashboard.total_products != None %}<div class="shop-stat"><span class="shop-stat-icon">{% include 'partials/icon.html' with kind='shirt' %}</span><h3>محصولات منتشرشده</h3><p>{{ dashboard.published_products|fa_num }} از {{ dashboard.total_products|fa_num }}</p></div>{% endif %}
@@ -30,7 +31,7 @@
         <h2>{% include 'partials/icon.html' with kind='bag' %} آخرین سفارش‌ها</h2>
         <div class="table-scroll" tabindex="0" role="region" aria-label="جدول آخرین سفارش‌ها">
           <table><thead><tr><th scope="col">شماره سفارش</th><th scope="col">مشتری</th><th scope="col">مبلغ</th><th scope="col">وضعیت</th></tr></thead>
-            <tbody>{% for order in dashboard.recent_orders %}<tr><td><a class="ltr" href="{% url 'admin:orders_order_change' order.pk %}">{{ order.order_number }}</a></td><td>{{ order.customer.full_name|default:order.customer.phone_number }}</td><td>{{ order.total|currency }}</td><td><span class="shop-pill {% if order.is_paid %}is-success{% elif order.can_pay %}is-warn{% else %}is-alert{% endif %}">{{ order.status_label }}</span></td></tr>{% empty %}<tr><td colspan="4">هنوز سفارشی ثبت نشده است.</td></tr>{% endfor %}</tbody>
+            <tbody>{% for order in dashboard.recent_orders %}<tr><td><a class="ltr" href="{% url 'admin:orders_order_change' order.pk %}">{{ order.order_number }}</a></td><td>{{ order.customer.full_name|default:order.customer.phone_number }}</td><td>{{ order.total|currency }}</td><td><span class="shop-pill {% if order.is_paid %}is-success{% elif order.manual_review_pending or order.can_pay %}is-warn{% else %}is-alert{% endif %}">{{ order.display_status_label }}</span></td></tr>{% empty %}<tr><td colspan="4">هنوز سفارشی ثبت نشده است.</td></tr>{% endfor %}</tbody>
           </table>
         </div>
       </section>

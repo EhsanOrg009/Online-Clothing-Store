@@ -12,7 +12,6 @@ from accounts.forms import AddressForm
 from accounts.models import Address
 from cart.services import cart_totals, get_cart
 
-from .choices import PaymentStatus
 from .forms import CheckoutNoteForm
 from .models import Order
 from .services import OrderError, create_order
@@ -189,6 +188,9 @@ def _start_payment(order: Order, request):
 def order_pay(request, order_number: str):
     """پرداخت مجدد یک سفارش پرداخت‌نشده."""
     order = get_object_or_404(Order, order_number=order_number, customer=request.user)
+    if order.manual_review_pending:
+        messages.warning(request, order.payment_review_message)
+        return redirect("orders:detail", order_number=order.order_number)
     if not order.can_pay:
         messages.error(request, _("این سفارش در حال حاضر قابل پرداخت نیست."))
         return redirect("orders:detail", order_number=order.order_number)
@@ -202,6 +204,7 @@ def order_pay(request, order_number: str):
 def order_list(request):
     orders = (
         Order.objects.for_customer(request.user)
+        .with_payment_review()
         .select_related("customer")
         .prefetch_related("items")
         .order_by("-created_at")
@@ -220,6 +223,7 @@ def order_detail(request, order_number: str):
     """
     order = (
         Order.objects.filter(order_number=order_number)
+        .with_payment_review()
         .select_related("customer")
         .prefetch_related("items")
         .first()
@@ -240,6 +244,6 @@ def order_detail(request, order_number: str):
         {
             "order": order, "payments": payments,
             "refund_pending": order.payments.filter(needs_refund=True).exists(),
-            "manual_review_pending": order.payments.filter(status=PaymentStatus.MANUAL_REVIEW).exists(),
+            "manual_review_pending": order.manual_review_pending,
         },
     )

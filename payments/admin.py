@@ -12,7 +12,7 @@ class PaymentAdmin(admin.ModelAdmin):
         "order_number",
         "gateway",
         "amount",
-        "status",
+        "status_display",
         "creation_status",
         "needs_refund",
         "reference_id",
@@ -63,6 +63,10 @@ class PaymentAdmin(admin.ModelAdmin):
     @admin.display(description=_("شماره سفارش"))
     def order_number(self, obj):
         return obj.order.order_number
+
+    @admin.display(description=_("وضعیت"), ordering="status")
+    def status_display(self, obj):
+        return obj.status_label
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("order")

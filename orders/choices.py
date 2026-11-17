@@ -4,6 +4,13 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 
 
+MANUAL_REVIEW_MESSAGE = _(
+    "زیبال دریافت وجه را تأیید کرده است، اما سفارش نیازمند بررسی پشتیبانی است. "
+    "لطفاً پرداخت تازه انجام ندهید و با پشتیبانی تماس بگیرید. "
+    "آماده‌سازی سفارش پس از پذیرش نهایی پرداخت انجام می‌شود."
+)
+
+
 class OrderStatus(models.TextChoices):
     """وضعیت چرخه عمر سفارش (تغییر فقط از مسیر کنترل‌شده)."""
 
@@ -33,6 +40,8 @@ class PaymentStatus(models.TextChoices):
 
     @classmethod
     def customer_label(cls, status: str) -> str:
+        if status == cls.MANUAL_REVIEW:
+            return _("نیازمند بررسی پشتیبانی")
         return dict(cls.choices).get(status, status)
 
 

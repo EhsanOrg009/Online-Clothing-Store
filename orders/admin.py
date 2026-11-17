@@ -49,21 +49,39 @@ class OrderItemInline(admin.TabularInline):
         return obj.variant_label
 
 
+class OrderPaymentStatusFilter(admin.SimpleListFilter):
+    title = _("وضعیت پرداخت")
+    parameter_name = "payment_status__exact"
+
+    def lookups(self, request, model_admin):
+        return [(status, PaymentStatus.customer_label(status)) for status in PaymentStatus.values]
+
+    def queryset(self, request, queryset):
+        review = Q(payment_status=PaymentStatus.MANUAL_REVIEW) | (
+            ~Q(payment_status=PaymentStatus.SUCCESSFUL) & Q(manual_review_count__gt=0)
+        )
+        if self.value() == PaymentStatus.MANUAL_REVIEW:
+            return queryset.filter(review)
+        if self.value() in PaymentStatus.values:
+            return queryset.filter(payment_status=self.value()).exclude(review)
+        return queryset
+
+
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     form = OrderAdminForm
     list_display = (
         "order_number",
         "customer_display",
-        "status",
-        "payment_status",
+        "order_status_display",
+        "payment_status_display",
         "manual_review_receipts",
         "total",
         "items_count",
         "tracking_number",
         "created_at",
     )
-    list_filter = ("status", "payment_status", "created_at", "province")
+    list_filter = ("status", OrderPaymentStatusFilter, "created_at", "province")
     search_fields = (
         "order_number",
         "receiver_name",
@@ -76,6 +94,7 @@ class OrderAdmin(admin.ModelAdmin):
     )
     readonly_fields = (
         "payment_status",
+        "payment_status_display",
         "order_number",
         "customer",
         "subtotal",
@@ -110,7 +129,7 @@ class OrderAdmin(admin.ModelAdmin):
                     "order_number",
                     "customer",
                     "status",
-                    "payment_status",
+                    "payment_status_display",
                     "manual_review_receipts",
                     "tracking_number",
                     "customer_note",
@@ -170,6 +189,14 @@ class OrderAdmin(admin.ModelAdmin):
     @admin.display(description=_("رسیدهای نیازمند بررسی دستی"), ordering="manual_review_count")
     def manual_review_receipts(self, obj):
         return obj.manual_review_count
+
+    @admin.display(description=_("وضعیت سفارش"), ordering="status")
+    def order_status_display(self, obj):
+        return obj.display_status_label
+
+    @admin.display(description=_("وضعیت پرداخت"), ordering="payment_status")
+    def payment_status_display(self, obj):
+        return PaymentStatus.customer_label(obj.display_payment_status)
 
     @transaction.atomic
     def save_model(self, request, obj, form, change):

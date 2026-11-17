@@ -122,7 +122,9 @@ def payment_callback(request, request_id=None):
 
 def _result_redirect(payment: Payment):
     order_number = payment.order.order_number
-    if payment.needs_refund or payment.is_pending or payment.requires_manual_review:
+    if payment.needs_refund or payment.is_pending or payment.requires_manual_review or (
+        not payment.order.is_paid and payment.order.manual_review_pending
+    ):
         return redirect("orders:detail", order_number=order_number)
     if payment.status == PaymentStatus.SUCCESSFUL:
         return redirect("payments:result_success", order_number=order_number)
@@ -136,7 +138,7 @@ def _result_redirect(payment: Payment):
 # ---------------------------------------------------------------------
 def _result_page(request, order_number: str, expected_status: str, template: str):
     order = get_object_or_404(
-        Order.objects.select_related("customer"), order_number=order_number
+        Order.objects.with_payment_review().select_related("customer"), order_number=order_number
     )
     if order.customer_id != request.user.id and not (
         request.user.is_staff and (request.user.has_perm("orders.view_order") or request.user.has_perm("orders.change_order"))
@@ -147,6 +149,8 @@ def _result_page(request, order_number: str, expected_status: str, template: str
     context = {"order": order, "payments": payments, "successful_payment": order.payments.filter(status=PaymentStatus.SUCCESSFUL, needs_refund=False).first()}
 
     # اگر وضعیت واقعی سفارش با صفحه درخواستی نمی‌خواند، به صفحه درست هدایت شود
+    if not order.is_paid and order.manual_review_pending:
+        return redirect("orders:detail", order_number=order.order_number)
     actual = order.payment_status
     if expected_status == "success" and actual != PaymentStatus.SUCCESSFUL:
         return redirect("orders:detail", order_number=order.order_number)

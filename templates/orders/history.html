@@ -11,7 +11,8 @@
 <div><a class="font-bold text-accent" href="{% url 'orders:detail' order.order_number %}"><bdi dir="ltr">{{ order.order_number }}</bdi></a><p class="mt-2 text-xs text-muted">{% jalali_datetime order.created_at %} · {{ order.items.count }} قلم</p>
 </div><strong>{{ order.total|currency }}</strong>
 </div>
-<div class="mt-4 flex flex-wrap items-center gap-3">{% include 'partials/status_badge.html' with kind='order' status=order.status %}{% include 'partials/status_badge.html' with kind='payment' status=order.payment_status %}</div>
+<div class="mt-4 flex flex-wrap items-center gap-3">{% include 'partials/status_badge.html' with kind='order' status=order.display_status %}{% include 'partials/status_badge.html' with kind='payment' status=order.display_payment_status %}</div>
+{% if order.manual_review_pending %}<p class="alert alert-warning mt-4" role="status">{{ order.payment_review_message }}</p>{% endif %}
 <div class="mt-4 flex flex-wrap justify-between gap-3 border-t border-line pt-4"><p class="text-sm text-muted">{{ order.receiver_name }} · {{ order.city }}</p>
 <div class="flex flex-wrap gap-2"><a class="btn-outline btn-sm" href="{% url 'orders:detail' order.order_number %}">جزئیات و پیگیری</a>{% if order.can_pay %}<form method="post" action="{% url 'orders:pay' order.order_number %}">{% csrf_token %}<button class="btn-primary btn-sm" type="submit">پرداخت سفارش</button>
 </form>{% endif %}</div>

@@ -359,6 +359,27 @@ class OrderLifecycleTests(OrderFixtureMixin, TestCase):
         self.order.refresh_from_db()
         self.assertFalse(self.order.can_pay)
 
+    def test_order_level_manual_review_is_unpaid_and_blocks_retry_without_receipt_lookup(self):
+        self.order.payment_status = PaymentStatus.MANUAL_REVIEW
+        self.order.save(update_fields=["payment_status"])
+        self.assertFalse(self.order.is_paid)
+        self.assertFalse(self.order.can_pay)
+        self.assertEqual(self.order.display_payment_status, PaymentStatus.MANUAL_REVIEW)
+        self.assertFalse(Order.objects.paid().filter(pk=self.order.pk).exists())
+
+    def test_locked_expiry_preserves_order_review_after_stale_candidate_selection(self):
+        from unittest.mock import patch
+        Order.objects.filter(pk=self.order.pk).update(
+            expires_at=timezone.now() - timedelta(minutes=1), payment_status=PaymentStatus.MANUAL_REVIEW,
+        )
+        with patch.object(Order.objects, "due_for_expiry", return_value=[self.order]):
+            self.assertEqual(expire_due_orders(), 0)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.PENDING_PAYMENT)
+        self.assertFalse(self.order.inventory_released)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 3)
+
     def test_order_list_scope(self):
         other = User.objects.create_user(phone_number="09123450002")
         Order.objects.create(

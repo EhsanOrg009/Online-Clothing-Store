@@ -22,7 +22,7 @@ from payments.gateways.zibal_time import confirmed_zone
 from payments.models import Payment, PaymentCreationStatus
 from payments.services import (
     PaymentError, classify_receipt, process_callback, potentially_successful_receipt,
-    receipt_history_fingerprint, recovery_receipt_snapshot, _authorize_recovery_primary,
+    receipt_history_fingerprint, receipt_review_reasons, recovery_receipt_snapshot, _authorize_recovery_primary,
 )
 from scripts.db_backup import BackupError, protect_recovery_backup, verify_backup_checksum
 
@@ -266,10 +266,10 @@ class Command(BaseCommand):
             report["blocking_issues"].append("Include all potentially successful unrecovered receipts explicitly: " + ", ".join(sorted(unselected)))
         if unresolved:
             report["blocking_issues"].append("Potentially successful receipts have incomplete validation: " + ", ".join(sorted(unresolved)))
-        independent_review = [p.authority for p in manual if p.metadata.get("decision", {}).get("reason") in (
+        independent_review = [p.authority for p in manual if receipt_review_reasons(p) & {
             "future_timestamp", "previous_future_timestamp", "gateway_receipt_conflict",
-            "receipt_identifiers_changed", "payment_identity_changed_during_verification",
-        )]
+            "receipt_identifiers_changed", "payment_identity_changed_during_verification", "previous_receipt_conflict",
+        }]
         selection_blockers = report["primary_selection_blockers"]
         selection_blockers.extend(report["blocking_issues"])
         if ambiguous:

@@ -21,7 +21,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
-from orders.choices import OrderStatus, PaymentStatus
+from orders.choices import MANUAL_REVIEW_MESSAGE, OrderStatus, PaymentStatus
 from orders.models import Order
 from orders.services import OrderError, OrderInventoryUnavailable, OrderNotPayable, mark_order_paid
 
@@ -45,6 +45,55 @@ class PaymentError(Exception):
 class ReceiptDecision:
     action: str
     reason: str
+
+
+def _sync_order_payment_review(order, *, resolved_receipt=False):
+    """Synchronize under the caller's Order-first lock; never authorize payment.
+
+    Resolving the last review as a refund must remove the review hold so normal
+    expiration can release inventory. Acceptance uses mark_order_paid instead.
+    """
+    if order.is_paid:
+        return
+    has_review = order.payments.filter(status=PaymentStatus.MANUAL_REVIEW).exists()
+    status = order.payment_status
+    if has_review and order.status in (OrderStatus.PENDING_PAYMENT, OrderStatus.PAYMENT_FAILED):
+        status = PaymentStatus.MANUAL_REVIEW
+    elif resolved_receipt and not has_review and status == PaymentStatus.MANUAL_REVIEW:
+        status = {
+            OrderStatus.PENDING_PAYMENT: PaymentStatus.PENDING,
+            OrderStatus.PAYMENT_FAILED: PaymentStatus.FAILED,
+            OrderStatus.CANCELLED: PaymentStatus.CANCELLED,
+        }.get(order.status, status)
+    if status != order.payment_status:
+        order.payment_status = status
+        order.save(update_fields=["payment_status", "updated_at"])
+
+
+def receipt_review_reasons(payment):
+    """Keep earlier review evidence effective after a later response/decision."""
+    metadata = payment.metadata if isinstance(payment.metadata, dict) else {}
+    decisions = [metadata.get("decision", {})]
+    verifications = [metadata.get("verification", {})]
+    for key, records in (("decision_history", decisions), ("verification_history", verifications)):
+        history = metadata.get(key, [])
+        if isinstance(history, list):
+            records.extend(entry.get("data", {}) for entry in history if isinstance(entry, dict))
+    decisions.extend(record.get("payment_time", {}) for record in verifications if isinstance(record, dict))
+    return {record["reason"] for record in decisions if isinstance(record, dict) and isinstance(record.get("reason"), str)}
+
+
+def _record_receipt_decision(payment, decision):
+    """Append decisions and preserve legacy evidence before updating the latest."""
+    history = list(payment.metadata.get("decision_history", []))
+    previous = payment.metadata.get("decision")
+    if isinstance(previous, dict) and previous and not any(
+        isinstance(entry, dict) and entry.get("data") == previous for entry in history
+    ):
+        history.append({"source": "stored_decision", "data": previous})
+    history.append({"data": decision})
+    payment.metadata["decision_history"] = history
+    payment.metadata["decision"] = decision
 
 
 def classify_receipt(order, gateway_paid_at, timestamp_issue="", *, primary_exists=False,
@@ -101,14 +150,14 @@ def _prepare_payment_request(order, gateway):
 
     if order.is_paid:
         raise PaymentError(_("این سفارش قبلاً پرداخت شده است."))
+    if order.manual_review_pending:
+        raise PaymentError(str(order.payment_review_message))
     if order.is_expired:
         raise PaymentError(_("مهلت پرداخت این سفارش به پایان رسیده است."))
     if not order.can_pay:
         raise PaymentError(_("این سفارش در حال حاضر قابل پرداخت نیست."))
     if not order.items.exists():
         raise PaymentError(_("اقلام این سفارش یافت نشد."))
-    if order.payments.filter(status=PaymentStatus.MANUAL_REVIEW).exists():
-        raise PaymentError(_("پرداخت قبلی نیازمند بررسی پشتیبانی است؛ لطفاً پرداخت تازه انجام ندهید."))
     history = list(order.payments.order_by("pk"))
     if any(p.creation_status in (
         PaymentCreationStatus.REQUESTING, PaymentCreationStatus.UNCERTAIN, PaymentCreationStatus.REVIEW,
@@ -205,6 +254,7 @@ def _finish_payment_request(snapshot, attempt, response, failure):
     if (
         not error and payment.status == PaymentStatus.PENDING
         and not potentially_successful_receipt(payment) and order.status == OrderStatus.PAYMENT_FAILED
+        and order.payment_status != PaymentStatus.MANUAL_REVIEW
     ):
         order.status, order.payment_status = OrderStatus.PENDING_PAYMENT, PaymentStatus.PENDING
         order.save(update_fields=["status", "payment_status", "updated_at"])
@@ -435,6 +485,7 @@ def _apply_verified_callback(snapshot, callback_data, result, *, allow_fulfillme
 
     observed_at = timezone.now()
     previously_successful = potentially_successful_receipt(payment)
+    previous_review_reasons = receipt_review_reasons(payment)
     history = list(payment.metadata.get("verification_history", []))
     previous_verification = payment.metadata.get("verification")
     if isinstance(previous_verification, dict) and previous_verification and not any(
@@ -474,10 +525,13 @@ def _apply_verified_callback(snapshot, callback_data, result, *, allow_fulfillme
             payment.reference_id = result.reference_id
         # A previously impossible timestamp needs a human audit even if time has
         # since caught up. A confirmed timezone can resolve timezone_unconfirmed.
-        if payment.metadata.get("decision", {}).get("reason") in (
-            "future_timestamp", "previous_future_timestamp",
-        ):
+        if previous_review_reasons & {"future_timestamp", "previous_future_timestamp"}:
             decision = ReceiptDecision("manual_review", "previous_future_timestamp")
+        elif previous_review_reasons & {
+            "gateway_receipt_conflict", "receipt_identifiers_changed", "payment_identity_changed_during_verification",
+            "previous_receipt_conflict",
+        }:
+            decision = ReceiptDecision("manual_review", "previous_receipt_conflict")
         if decision.action == "accept" and not allow_fulfillment:
             decision = ReceiptDecision("manual_review", "recovery_primary_not_selected")
         payment.gateway_paid_at = result.gateway_paid_at
@@ -499,15 +553,16 @@ def _apply_verified_callback(snapshot, callback_data, result, *, allow_fulfillme
         payment.error_message = {
             "accept": "",
             "refund": "وجه دریافت شده اما سفارش قابل پرداخت نیست یا قبلاً پرداخت شده؛ نیازمند بازگشت وجه دستی.",
-            "manual_review": "وجه در زیبال تأیید شده؛ زمان پرداخت یا وضعیت سفارش نیازمند بررسی پشتیبانی است.",
+            "manual_review": str(MANUAL_REVIEW_MESSAGE),
         }[decision.action]
-        payment.metadata["decision"] = {
+        _record_receipt_decision(payment, {
             "action": decision.action, "reason": decision.reason,
             "order_expires_at": deadline.isoformat() if deadline else None,
             "inventory_released": order.inventory_released,
             "observed_at": observed_at.isoformat(),
-        }
+        })
         payment.save()
+        _sync_order_payment_review(order, resolved_receipt=decision.action == "refund")
         logger.log(
             logging.INFO if decision.action == "accept" else logging.WARNING,
             "Verified receipt %s: %s (%s)", payment.authority, decision.action, decision.reason,
@@ -520,8 +575,11 @@ def _apply_verified_callback(snapshot, callback_data, result, *, allow_fulfillme
         payment.status = PaymentStatus.MANUAL_REVIEW
         payment.needs_refund = False
         payment.error_message = "گزارش تازهٔ درگاه با دریافت وجه قبلی مغایر است؛ نیازمند بررسی دستی."
-        payment.metadata["decision"] = {"action": "manual_review", "reason": "gateway_receipt_conflict"}
+        _record_receipt_decision(payment, {
+            "action": "manual_review", "reason": "gateway_receipt_conflict", "observed_at": observed_at.isoformat(),
+        })
         payment.save()
+        _sync_order_payment_review(order)
         return payment
 
     payment.status = result.status or PaymentStatus.FAILED
@@ -533,7 +591,12 @@ def _apply_verified_callback(snapshot, callback_data, result, *, allow_fulfillme
         return payment
 
     order = payment.order
-    if order.status == OrderStatus.PENDING_PAYMENT:
+    _sync_order_payment_review(order)
+    if order.status == OrderStatus.PENDING_PAYMENT and order.payment_status != PaymentStatus.MANUAL_REVIEW and not order.payments.exclude(
+        pk=payment.pk,
+    ).filter(status=PaymentStatus.MANUAL_REVIEW).exists():
+        # A failed legacy attempt must not present an order holding an
+        # unresolved verified receipt as an ordinary failed payment.
         if payment.status == PaymentStatus.FAILED:
             order.status = OrderStatus.PAYMENT_FAILED
             order.payment_status = PaymentStatus.FAILED

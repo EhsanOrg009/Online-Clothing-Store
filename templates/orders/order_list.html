@@ -29,8 +29,8 @@
               <div class="flex flex-wrap items-center gap-3">
                 <a href="{% url 'orders:detail' order.order_number %}"
                    class="ltr font-semibold hover:text-accent" dir="ltr">{{ order.order_number }}</a>
-                {% include "partials/status_badge.html" with kind="order" status=order.status %}
-                {% include "partials/status_badge.html" with kind="payment" status=order.payment_status %}
+                {% include "partials/status_badge.html" with kind="order" status=order.display_status %}
+                {% include "partials/status_badge.html" with kind="payment" status=order.display_payment_status %}
               </div>
               <p class="mt-2 text-sm text-muted">
                 تاریخ ثبت: {% jalali_datetime order.created_at %}

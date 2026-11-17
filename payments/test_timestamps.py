@@ -53,7 +53,8 @@ class GatewayTimestampTests(SimpleTestCase):
     def test_invalid_configuration_requires_manual_review(self):
         for name in ("unknown/zone", " Asia/Tehran", "", "/etc/localtime"):
             with self.subTest(name=name):
-                self.assertTrue(self.parse("2026-11-14T10:28:00", confirmed_timezone=name).issue)
+                self.assertEqual(self.parse("2026-11-14T10:28:00", confirmed_timezone=name).issue,
+                                 "timezone_unconfirmed" if not name else "invalid_timezone_configuration")
 
     def test_dst_fold_is_not_silently_chosen(self):
         self.assertEqual(self.parse(
@@ -244,6 +245,98 @@ class PaymentDeadlineTests(fixtures.PaymentFixtureMixin, fixtures.PaymentTestCas
         self.assertEqual(repeated.paid_at, first.paid_at)
         self.assertEqual(repeated.metadata["decision"]["reason"], "gateway_receipt_conflict")
         self.assertEqual(len(repeated.metadata["verification_history"]), 2)
+
+    def test_missing_paid_at_preserves_its_absence_and_requires_review(self):
+        self.server_transactions[self.payment.authority].pop("paidAt")
+        payment = self.pay()
+        self.assertEqual(payment.status, PaymentStatus.MANUAL_REVIEW)
+        self.assertNotIn("paidAt", payment.metadata["verification"])
+        self.assertEqual(payment.metadata["verification"]["payment_time"]["reason"], "invalid_timestamp")
+        self.assertEqual(payment.metadata["decision"]["reason"], "invalid_timestamp")
+        self.assertIsNone(payment.gateway_paid_at)
+        self.assertFalse(payment.needs_refund)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.payment_status, PaymentStatus.MANUAL_REVIEW)
+        self.assertFalse(self.order.is_paid)
+
+    def test_invalid_configuration_and_dst_issues_propagate_to_the_preserved_receipt(self):
+        for raw, zone, reason in (
+            ("2026-11-14T10:28:00", "unknown/zone", "invalid_timezone_configuration"),
+            ("2026-11-01T01:30:00", "America/New_York", "ambiguous_local_time"),
+            ("2026-03-08T02:30:00", "America/New_York", "nonexistent_local_time"),
+            ("2026-11-14T10:28:00-00:00", "", "unknown_offset"),
+            ("2026-11-14T10:28:00+03:60", "", "invalid_timestamp"),
+        ):
+            with self.subTest(reason=reason):
+                self.set_time(raw)
+                payment = process_callback(self.payment, self.callback_data(self.payment), gateway_timezone=zone)
+                self.assertEqual(payment.status, PaymentStatus.MANUAL_REVIEW)
+                self.assertEqual(payment.metadata["verification"]["paidAt"], raw)
+                self.assertEqual(payment.metadata["verification"]["payment_time"]["reason"], reason)
+                self.assertEqual(payment.metadata["decision"]["reason"], reason)
+                self.assertIsNone(payment.gateway_paid_at)
+                self.assertFalse(payment.needs_refund)
+                self.order.refresh_from_db()
+                self.assertFalse(self.order.is_paid)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_resolving_last_review_as_a_late_refund_restores_normal_expiration_once(self):
+        deadline = timezone.now() - timedelta(minutes=5)
+        raw = (deadline + timedelta(minutes=2)).replace(tzinfo=None).isoformat()
+        Order.objects.filter(pk=self.order.pk).update(expires_at=deadline)
+        self.set_time(raw)
+        original = self.pay()
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.payment_status, PaymentStatus.MANUAL_REVIEW)
+        self.assertEqual(expire_due_orders(), 0)
+        with override_settings(ZIBAL_PAID_AT_TIMEZONE="UTC"):
+            recovered = self.pay()
+        self.assertTrue(recovered.needs_refund)
+        self.assertEqual(recovered.metadata["decision"]["reason"], "paid_after_deadline")
+        self.assertEqual(recovered.paid_at, original.paid_at)
+        self.assertIn(original.metadata["decision"], [entry["data"] for entry in recovered.metadata["decision_history"]])
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.payment_status, PaymentStatus.PENDING)
+        self.assertEqual(self.order.expires_at, deadline)
+        self.assertFalse(self.order.is_paid)
+        self.assertEqual(expire_due_orders(), 1)
+        self.assertEqual(expire_due_orders(), 0)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 5)
+
+    def test_cancelled_review_is_not_revived_when_test_timezone_resolves_the_receipt(self):
+        self.set_time("2026-11-14T10:28:00")
+        self.pay()
+        cancel_order(self.order)
+        with override_settings(ZIBAL_PAID_AT_TIMEZONE="UTC"):
+            recovered = self.pay()
+        self.assertTrue(recovered.needs_refund)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.CANCELLED)
+        self.assertEqual(self.order.payment_status, PaymentStatus.CANCELLED)
+        self.assertFalse(self.order.is_paid)
+        self.assertTrue(self.order.inventory_released)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 5)
+
+    def test_future_review_cannot_be_erased_by_conflict_then_accepted_when_clock_catches_up(self):
+        from unittest.mock import patch
+        paid_at = timezone.now() + timedelta(hours=1)
+        self.set_time(paid_at.isoformat())
+        first = self.pay()
+        self.set_outcome(self.payment, "failed")
+        self.pay()
+        self.set_outcome(self.payment, "successful")
+        with patch("django.utils.timezone.now", return_value=paid_at + timedelta(seconds=1)):
+            repeated = self.pay()
+        self.assertEqual(repeated.status, PaymentStatus.MANUAL_REVIEW)
+        self.assertEqual(repeated.metadata["decision"]["reason"], "previous_future_timestamp")
+        self.assertIn(first.metadata["decision"], [entry["data"] for entry in repeated.metadata["decision_history"]])
+        self.assertFalse(repeated.needs_refund)
+        self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
 
     def test_locally_cancelled_attempt_can_be_reverified_after_real_success(self):
         self.set_outcome(self.payment, "cancelled")

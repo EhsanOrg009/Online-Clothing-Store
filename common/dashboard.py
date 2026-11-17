@@ -27,14 +27,16 @@ def build_dashboard_context(user) -> dict:
         stats["out_of_stock_variants"] = ProductVariant.objects.filter(is_active=True, stock=0).count()
     if can_view(user, Order):
         successful = Q(payment_status=PaymentStatus.SUCCESSFUL)
-        stats.update(Order.objects.aggregate(
+        review = Q(payment_status=PaymentStatus.MANUAL_REVIEW) | (~successful & Q(_manual_review_receipt_exists=True))
+        stats.update(Order.objects.with_payment_review().aggregate(
             new_orders=Count("pk", filter=Q(status__in=[OrderStatus.PENDING_PAYMENT, OrderStatus.PAID])),
             paid_orders=Count("pk", filter=successful),
             shipped_orders=Count("pk", filter=Q(status__in=[OrderStatus.SHIPPED, OrderStatus.DELIVERED])),
             total_sales=Sum("total", filter=successful, default=0),
-            pending_payment_orders=Count("pk", filter=Q(status=OrderStatus.PENDING_PAYMENT) & (Q(expires_at__gt=timezone.now()) | Q(expires_at__isnull=True))),
+            pending_payment_orders=Count("pk", filter=Q(status=OrderStatus.PENDING_PAYMENT) & ~review & (Q(expires_at__gt=timezone.now()) | Q(expires_at__isnull=True))),
+            manual_review_orders=Count("pk", filter=review),
         ))
-        stats["recent_orders"] = Order.objects.select_related("customer").order_by("-created_at")[:8]
+        stats["recent_orders"] = Order.objects.with_payment_review().select_related("customer").order_by("-created_at")[:8]
         if can_view(user, OrderItem):
             stats["total_items_sold"] = OrderItem.objects.filter(order__payment_status=PaymentStatus.SUCCESSFUL).aggregate(total=Sum("quantity", default=0))["total"]
             if can_view(user, Product):

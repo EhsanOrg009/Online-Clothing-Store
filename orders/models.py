@@ -22,7 +22,7 @@ from accounts.models import User
 from common.models import TimeStampedModel
 from products.models import Product, ProductVariant
 
-from .choices import OrderStatus, PaymentStatus
+from .choices import MANUAL_REVIEW_MESSAGE, OrderStatus, PaymentStatus
 
 # حروف بدون ابهام برای شماره سفارش خوانا
 _ORDER_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -45,6 +45,14 @@ class OrderQuerySet(models.QuerySet):
 
     def paid(self):
         return self.filter(payment_status=PaymentStatus.SUCCESSFUL)
+
+    def with_payment_review(self):
+        """Include every manual receipt, without a join or a per-order query."""
+        from payments.models import Payment
+
+        return self.annotate(_manual_review_receipt_exists=models.Exists(
+            Payment.objects.filter(order_id=models.OuterRef("pk"), status=PaymentStatus.MANUAL_REVIEW),
+        ))
 
     def due_for_expiry(self, now=None):
         now = now or timezone.now()
@@ -159,7 +167,49 @@ class Order(TimeStampedModel):
         return self.status in (
             OrderStatus.PENDING_PAYMENT,
             OrderStatus.PAYMENT_FAILED,
-        ) and not self.is_paid and not self.inventory_released and not self.is_expired
+        ) and not self.is_paid and not self.inventory_released and not self.is_expired and not self.manual_review_pending
+
+    @property
+    def manual_review_pending(self) -> bool:
+        """Also recognize legacy orders whose stored payment status is pending.
+
+        An annotation is a display snapshot only. Locked financial services load
+        a fresh unannotated Order and query its current receipts.
+        """
+        if self.payment_status == PaymentStatus.MANUAL_REVIEW:
+            return True
+        if hasattr(self, "_manual_review_receipt_exists"):
+            return self._manual_review_receipt_exists
+        if hasattr(self, "manual_review_count"):
+            return self.manual_review_count > 0
+        return bool(self.pk and self.payments.filter(status=PaymentStatus.MANUAL_REVIEW).exists())
+
+    @property
+    def display_payment_status(self) -> str:
+        # A valid primary remains paid even if an additional receipt needs review.
+        if not self.is_paid and self.manual_review_pending:
+            return PaymentStatus.MANUAL_REVIEW
+        return self.payment_status
+
+    @property
+    def display_status(self) -> str:
+        if not self.is_paid and self.manual_review_pending and self.status in (
+            OrderStatus.PENDING_PAYMENT, OrderStatus.PAYMENT_FAILED,
+        ):
+            return PaymentStatus.MANUAL_REVIEW
+        return self.status
+
+    @property
+    def display_status_label(self) -> str:
+        if self.display_status == PaymentStatus.MANUAL_REVIEW:
+            return PaymentStatus.customer_label(PaymentStatus.MANUAL_REVIEW)
+        return self.status_label
+
+    @property
+    def payment_review_message(self) -> str:
+        if self.is_paid:
+            return _("یکی از پرداخت‌های این سفارش نیازمند بررسی پشتیبانی است. لطفاً پرداخت تازه انجام ندهید و با پشتیبانی تماس بگیرید.")
+        return MANUAL_REVIEW_MESSAGE
 
     @property
     def status_label(self) -> str:

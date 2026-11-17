@@ -59,6 +59,20 @@ def _track_id(value: str | int) -> int:
     return int(text)
 
 
+def _reference_id(reference) -> str:
+    """Validate once for verification and read-only audit comparisons."""
+    if type(reference) is int and 0 < reference < 10**REFERENCE_MAX_LENGTH:
+        return str(reference)
+    if (
+        isinstance(reference, str)
+        and re.fullmatch(rf"[0-9]{{1,{REFERENCE_MAX_LENGTH}}}", reference)
+        and int(reference) > 0
+    ):
+        # Preserve the gateway's representation, including leading zeros.
+        return reference
+    raise PaymentGatewayError("شماره مرجع گزارش زیبال نامعتبر است.")
+
+
 def parse_callback(data) -> dict[str, str]:
     """فقط پارامترهای Callback عادی زیبال، بدون پارامتر تکراری، پذیرفته می‌شوند."""
     parsed = {}
@@ -200,18 +214,7 @@ class ZibalGateway(PaymentGateway):
     def _verified_result(self, payment, data: dict, verify_result: int) -> VerificationResult:
         if self._check_details(payment, data) != 1:
             raise PaymentGatewayError("زیبال پرداخت تأییدشده‌ای برای این تراکنش گزارش نکرد.")
-        reference = data.get("refNumber")
-        if type(reference) is int and 0 < reference < 10**REFERENCE_MAX_LENGTH:
-            reference_id = str(reference)
-        elif (
-            isinstance(reference, str)
-            and re.fullmatch(rf"[0-9]{{1,{REFERENCE_MAX_LENGTH}}}", reference)
-            and int(reference) > 0
-        ):
-            # Preserve the gateway's representation, including leading zeros.
-            reference_id = reference
-        else:
-            raise PaymentGatewayError("شماره مرجع گزارش زیبال نامعتبر است.")
+        reference_id = _reference_id(data.get("refNumber"))
         paid_at = parse_gateway_paid_at(
             data.get("paidAt"), confirmed_timezone=self.paid_at_timezone,
         )

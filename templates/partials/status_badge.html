@@ -1,6 +1,11 @@
 {% load shop_extras %}
 {# نمایش وضعیت سفارش/پرداخت با رنگ مناسب — ورودی: status (مقدار کلید) + kind (order|payment) #}
-{% if kind == "order" %}
+{% if status == "manual_review" %}
+  <span class="badge-warning" title="زیبال دریافت وجه را تأیید کرده است؛ سفارش نیازمند بررسی پشتیبانی است">
+    <span class="h-1.5 w-1.5 shrink-0 animate-pulse-soft rounded-full bg-warning" aria-hidden="true"></span>
+    نیازمند بررسی پشتیبانی
+  </span>
+{% elif kind == "order" %}
   {% if status == "pending_payment" %}
     <span class="badge-warning" title="در انتظار پرداخت">
       <span class="h-1.5 w-1.5 shrink-0 animate-pulse-soft rounded-full bg-warning" aria-hidden="true"></span>

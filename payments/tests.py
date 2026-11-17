@@ -7,7 +7,7 @@ import json
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import timedelta, timezone as datetime_timezone
 from decimal import Decimal
 from http.client import BadStatusLine, IncompleteRead
 from pathlib import Path
@@ -22,7 +22,7 @@ from django.db import close_old_connections, connection, transaction
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import (
-    Client, RequestFactory, TestCase, TransactionTestCase,
+    Client, RequestFactory, SimpleTestCase, TestCase, TransactionTestCase,
     override_settings, skipUnlessDBFeature,
 )
 from django.urls import reverse
@@ -615,6 +615,9 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertEqual(self.order.payment_status, PaymentStatus.PENDING)
 
     def test_success_is_verified_server_side_before_order_is_paid(self):
+        paid_at = timezone.now() - timedelta(seconds=1)
+        raw_time = paid_at.astimezone(datetime_timezone(timedelta(hours=3, minutes=30))).isoformat()
+        self.server_transactions[self.payment.authority].update(trackId=int(self.payment.authority), paidAt=raw_time)
         payment = process_callback(self.payment, self.callback_data(self.payment))
         request = self.api_calls("/v1/verify")[0].args[0]
         self.assertEqual(json.loads(request.data), {"merchant": "zibal", "trackId": int(payment.authority)})
@@ -623,6 +626,10 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertEqual(payment.reference_id, str(int(payment.authority) + 100))
         self.assertIsNotNone(payment.verified_at)
         self.assertIsNotNone(payment.paid_at)
+        self.assertEqual(payment.gateway_paid_at, paid_at)
+        self.assertEqual(payment.metadata["verification"]["paidAt"], raw_time)
+        self.assertEqual(payment.metadata["verification"]["trackId"], int(payment.authority))
+        self.assertEqual(payment.metadata["verification"]["payment_time"]["source"], "offset")
         self.assertEqual(payment.metadata["verification"]["amount"], int(payment.amount) * 10)
         self.assertNotIn("cardNumber", payment.metadata["verification"])
         self.assertNotIn("merchant", payment.metadata["verification"])
@@ -769,10 +776,15 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
         original = self.server_transactions[self.payment.authority].copy()
         for field, value in (
             ("amount", original["amount"] + 10),
+            ("amount", int(self.payment.amount)),  # Toman is not a Rial amount.
             ("amount", True),
+            ("amount", float(original["amount"])),
             ("amount", str(original["amount"])),
             ("orderId", "OTHER-ORDER"),
             ("trackId", int(self.payment.authority) + 1),
+            ("trackId", str(int(self.payment.authority) + 1)),
+            ("trackId", None),
+            ("trackId", True),
         ):
             self.server_transactions[self.payment.authority] = {**original, field: value}
             with self.subTest(field=field, value=value), self.assertRaises(PaymentError):
@@ -791,6 +803,17 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
             with self.subTest(changes=changes), self.assertRaises(PaymentError):
                 process_callback(self.payment, self.callback_data(self.payment))
             self.assert_unpaid()
+
+    def test_documented_response_can_omit_track_id_and_present_values_are_compared_numerically(self):
+        original = {**self.server_transactions[self.payment.authority], "status": 1}
+        for supplied in ({}, {"trackId": int(self.payment.authority)}, {"trackId": self.payment.authority}):
+            with self.subTest(supplied=supplied):
+                self.http.side_effect = [self.http_response({**original, **supplied})]
+                result = get_gateway().verify_payment(self.payment, self.callback_data(self.payment))
+                self.assertTrue(result.successful)
+                self.assertEqual(result.transaction_id, self.payment.authority)
+                self.assertEqual("trackId" in result.raw, "trackId" in supplied)
+                self.assert_unpaid()  # A gateway result alone does not apply fulfillment.
 
     def test_previously_verified_transaction_requires_matching_inquiry(self):
         self.server_transactions[self.payment.authority]["status"] = 1
@@ -956,6 +979,9 @@ class CallbackTests(PaymentFixtureMixin, PaymentTestCase):
                 self.assertEqual(payment.metadata["verification"]["paidAt"], paid_at)
                 self.order.refresh_from_db()
                 self.assertFalse(self.order.is_paid)
+                self.assertEqual(self.order.payment_status, PaymentStatus.MANUAL_REVIEW)
+                self.assertEqual(payment.metadata["verification"]["payment_time"]["reason"], "invalid_timestamp")
+                self.assertEqual(payment.metadata["decision"]["reason"], "invalid_timestamp")
                 self.assertIsNotNone(payment.paid_at)
 
     def test_malformed_verification_response_does_not_pay_order(self):
@@ -1808,6 +1834,53 @@ class RecoveryCommandTests(PaymentFixtureMixin, PaymentTestCase):
         self.variant.refresh_from_db()
         self.assertEqual(self.variant.stock, 4)
 
+    def test_test_only_confirmed_timezone_recovers_existing_receipts_without_replacing_their_audits(self):
+        # Asia/Tehran is synthetic confirmation here, not a claim about Zibal.
+        primary = self.payments[1]
+        primary.request_id = uuid4()
+        primary.metadata["incident_note"] = "synthetic original audit"
+        primary.save(update_fields=["request_id", "metadata"])
+        originals = {}
+        for payment in self.payments:
+            self.server_transactions[payment.authority]["paidAt"] = self.server_transactions[payment.authority]["paidAt"].removesuffix("Z")
+            stored = process_callback(payment, self.callback_data(payment))
+            originals[stored.pk] = stored
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid:
+            report = self.reconcile(apply=True, backup=self.backup, gateway_timezone="Asia/Tehran")
+            repeated = self.reconcile(apply=True, backup=self.backup, gateway_timezone="Asia/Tehran")
+        paid.assert_called_once()
+        self.assertEqual(report["actual_primary"], [primary.authority])
+        self.assertEqual(repeated["actual_primary"], report["actual_primary"])
+        self.assertEqual(self.order.payments.count(), 3)
+        for stored in self.order.payments.all():
+            original = originals[stored.pk]
+            for field in ("authority", "order_id", "request_id", "amount", "reference_id", "transaction_id", "paid_at"):
+                self.assertEqual(getattr(stored, field), getattr(original, field))
+            self.assertEqual(stored.metadata["verification"]["paidAt"], original.metadata["verification"]["paidAt"])
+            self.assertIn(original.metadata["verification"], [entry["data"] for entry in stored.metadata["verification_history"]])
+            self.assertIn(original.metadata["decision"], [entry["data"] for entry in stored.metadata["decision_history"]])
+            self.assertEqual(stored.metadata["verification"]["payment_time"]["source"], "configuration")
+            self.assertTrue(stored.metadata["recovery_history"])
+        primary.refresh_from_db()
+        self.assertEqual(primary.gateway_paid_at.isoformat(), "2026-11-14T07:01:00+00:00")
+        self.assertEqual(primary.metadata["incident_note"], "synthetic original audit")
+        self.assertEqual(primary.status, PaymentStatus.SUCCESSFUL)
+        self.assertFalse(primary.needs_refund)
+        self.assertEqual(len(self.api_calls("/v1/request")), 0)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_archived_conflict_blocks_recovery_even_if_latest_decision_is_only_timezone_review(self):
+        receipt = self.manual_receipt(self.payment)
+        receipt.metadata["decision_history"].append({"data": {"action": "manual_review", "reason": "receipt_identifiers_changed"}})
+        receipt.save(update_fields=["metadata"])
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid:
+            with self.assertRaises(CommandError):
+                self.reconcile(apply=True, backup=self.backup)
+        paid.assert_not_called()
+        self.assertIsNone(self.report()["planned_primary"])
+        self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
+
     def test_receipt_evidence_in_a_nonfinal_status_blocks_incomplete_inquiry(self):
         Payment.objects.filter(pk=self.payments[0].pk).update(
             status=PaymentStatus.FAILED, gateway_paid_at=timezone.now() - timedelta(minutes=1),
@@ -2277,6 +2350,77 @@ class ConcurrentCallbackTests(PaymentFixtureMixin, PaymentAPIStubMixin, Transact
         self.assertEqual(self.order.status, OrderStatus.PAID)
         self.assertEqual(self.order.payment_status, PaymentStatus.SUCCESSFUL)
 
+    def test_concurrent_identical_manual_callbacks_keep_one_order_hold_and_preserve_receipt(self):
+        self.server_transactions[self.payment.authority]["paidAt"] = "2026-11-14T10:28:00"
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid:
+            self.run_callbacks([self.payment, self.payment])
+        paid.assert_not_called()
+        self.payment.refresh_from_db()
+        self.order.refresh_from_db()
+        self.assertEqual(self.payment.callback_count, 2)
+        self.assertEqual(self.payment.status, PaymentStatus.MANUAL_REVIEW)
+        self.assertEqual(self.order.payment_status, PaymentStatus.MANUAL_REVIEW)
+        self.assertFalse(self.order.is_paid)
+        self.assertFalse(self.payment.needs_refund)
+        self.assertIsNone(self.payment.gateway_paid_at)
+        self.assertEqual(self.payment.metadata["verification"]["paidAt"], "2026-11-14T10:28:00")
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_failed_callback_after_concurrent_manual_winner_cannot_downgrade_order(self):
+        from payments.services import _apply_verified_callback
+        other = self.historical_payment()
+        self.set_outcome(other, "failed")
+        self.server_transactions[self.payment.authority]["paidAt"] = "2026-11-14T10:28:00"
+        reviewed = Event()
+        def apply(snapshot, *args, **kwargs):
+            if snapshot.pk == other.pk and not reviewed.wait(10):
+                raise AssertionError("Manual winner was not applied")
+            result = _apply_verified_callback(snapshot, *args, **kwargs)
+            if snapshot.pk == self.payment.pk:
+                reviewed.set()
+            return result
+        with patch("payments.services._apply_verified_callback", side_effect=apply):
+            self.run_callbacks([self.payment, other])
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.payment_status, PaymentStatus.MANUAL_REVIEW)
+        self.assertEqual(self.order.status, OrderStatus.PENDING_PAYMENT)
+        self.assertFalse(self.order.is_paid)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_cancellation_committing_during_verify_never_revives_order(self):
+        from orders.services import cancel_order
+        started, release = Event(), Event()
+        def slow(request, *, timeout):
+            if urlsplit(request.full_url).path == "/v1/verify":
+                started.set()
+                if not release.wait(10):
+                    raise AssertionError("Cancellation race was not released")
+            return self.api_call(request, timeout=timeout)
+        self.http.side_effect = slow
+        def callback():
+            close_old_connections()
+            try:
+                return process_callback(self.payment, self.callback_data(self.payment))
+            finally:
+                close_old_connections()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(callback)
+            try:
+                self.assertTrue(started.wait(10))
+                cancel_order(self.order)
+            finally:
+                release.set()
+            result = pending.result(20)
+        self.assertTrue(result.needs_refund)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, OrderStatus.CANCELLED)
+        self.assertTrue(self.order.inventory_released)
+        self.assertFalse(self.order.is_paid)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 5)
+
     def run_callback_expiry_race(self, *, callback_first):
         from orders.services import expire_due_orders, _restore_stock
         deadline = timezone.now() - timedelta(minutes=5)
@@ -2614,3 +2758,308 @@ class ReceiptSafetyTests(PaymentFixtureMixin, PaymentTestCase):
         self.assertIn(previous, [entry["data"] for entry in receipt.metadata["verification_history"]])
         self.assertEqual(receipt.metadata["verification"]["status"], 5)
         self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
+
+
+class ManualReviewPresentationTests(PaymentFixtureMixin, PaymentTestCase):
+    def setUp(self):
+        super().setUp()
+        self.build_payment_data()
+        self.payment = self.start_payment()
+        self.client.force_login(self.customer)
+
+    def review(self, *, legacy=False):
+        self.server_transactions[self.payment.authority]["paidAt"] = "2026-11-14T10:28:00.136000"
+        result = process_callback(self.payment, self.callback_data(self.payment))
+        if legacy:
+            Order.objects.filter(pk=self.order.pk).update(payment_status=PaymentStatus.PENDING)
+        self.order.refresh_from_db()
+        return result
+
+    def assert_review_page(self, response):
+        self.assertContains(response, "نیازمند بررسی پشتیبانی")
+        self.assertContains(response, "زیبال دریافت وجه را تأیید کرده است")
+        self.assertContains(response, "لطفاً پرداخت تازه انجام ندهید")
+        self.assertNotContains(response, "در انتظار پرداخت")
+        self.assertNotContains(response, "پرداخت با موفقیت انجام شد")
+        self.assertNotContains(response, 'action="' + reverse("orders:pay", args=[self.order.order_number]) + '"')
+
+    def test_review_updates_payment_state_without_fulfilling_or_releasing_inventory(self):
+        deadline = self.order.expires_at
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid:
+            result = self.review()
+        paid.assert_not_called()
+        self.assertEqual(result.status, PaymentStatus.MANUAL_REVIEW)
+        self.assertEqual(result.creation_status, PaymentCreationStatus.READY)
+        self.assertIsNotNone(result.request_id)
+        self.assertIsNotNone(result.paid_at)
+        self.assertIsNotNone(result.verified_at)
+        self.assertIsNone(result.gateway_paid_at)
+        self.assertFalse(result.needs_refund)
+        audit = result.metadata["verification"]["payment_time"]
+        self.assertEqual(audit["reason"], "timezone_unconfirmed")
+        self.assertEqual(audit["source"], "")
+        self.assertEqual(audit["timezone"], "")
+        self.assertIsNone(audit["normalized_paid_at"])
+        self.assertEqual(result.metadata["decision"]["reason"], "timezone_unconfirmed")
+        self.assertEqual(self.order.status, OrderStatus.PENDING_PAYMENT)
+        self.assertEqual(self.order.payment_status, PaymentStatus.MANUAL_REVIEW)
+        self.assertFalse(self.order.is_paid)
+        self.assertFalse(self.order.can_pay)
+        self.assertFalse(self.order.inventory_released)
+        self.assertIsNone(self.order.paid_at)
+        self.assertEqual(self.order.expires_at, deadline)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_customer_detail_and_history_show_coherent_review_state(self):
+        self.review()
+        for url in (reverse("orders:detail", args=[self.order.order_number]), reverse("orders:list")):
+            with self.subTest(url=url):
+                self.assert_review_page(self.client.get(url))
+
+    def test_legacy_order_uses_receipt_for_display_without_financial_writes(self):
+        result = self.review(legacy=True)
+        before = json.loads(json.dumps(result.metadata))
+        for url in (reverse("orders:detail", args=[self.order.order_number]), reverse("orders:list")):
+            with self.subTest(url=url):
+                self.assert_review_page(self.client.get(url))
+        self.order.refresh_from_db()
+        result.refresh_from_db()
+        self.assertEqual(self.order.payment_status, PaymentStatus.PENDING)
+        self.assertEqual(self.order.display_payment_status, PaymentStatus.MANUAL_REVIEW)
+        self.assertEqual(result.metadata, before)
+        self.assertEqual(result.callback_count, 1)
+        self.assertFalse(self.order.can_pay)
+
+    def test_review_older_than_the_last_five_attempts_is_still_visible_and_protects_order(self):
+        self.review(legacy=True)
+        for number in range(6):
+            Payment.objects.create(order=self.order, gateway="zibal", amount=self.order.total,
+                                   authority=str(900000000 + number), status=PaymentStatus.FAILED)
+        response = self.client.get(reverse("orders:detail", args=[self.order.order_number]))
+        self.assertTrue(response.context["manual_review_pending"])
+        self.assertNotIn(self.payment.pk, [p.pk for p in response.context["payments"]])
+        self.assertContains(response, "لطفاً پرداخت تازه انجام ندهید")
+        self.assertNotContains(response, "در انتظار پرداخت")
+        self.assertFalse(response.context["order"].can_pay)
+        self.assertNotContains(response, 'action="' + reverse("orders:pay", args=[self.order.order_number]) + '"')
+
+    def test_expired_review_does_not_show_an_ordinary_deadline_failure_or_expire_stock(self):
+        from orders.services import expire_due_orders
+        self.review()
+        Order.objects.filter(pk=self.order.pk).update(expires_at=timezone.now() - timedelta(minutes=1))
+        response = self.client.get(reverse("orders:detail", args=[self.order.order_number]))
+        self.assert_review_page(response)
+        self.assertNotContains(response, "مهلت پرداخت تمام شده است")
+        self.assertEqual(expire_due_orders(), 0)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_pay_post_and_stale_result_urls_cannot_create_a_charge_or_claim_success(self):
+        self.review(legacy=True)
+        self.http.reset_mock()
+        response = self.client.post(reverse("orders:pay", args=[self.order.order_number]), {"amount": "1"}, follow=True)
+        self.assert_review_page(response)
+        self.assertTrue(all(message.level_tag != "success" for message in response.context["messages"]))
+        for financial_status in (PaymentStatus.PENDING, PaymentStatus.FAILED, PaymentStatus.CANCELLED):
+            Order.objects.filter(pk=self.order.pk).update(payment_status=financial_status)
+            for route in ("result_success", "result_failed", "result_cancelled"):
+                with self.subTest(financial_status=financial_status, route=route):
+                    response = self.client.get(reverse("payments:" + route, args=[self.order.order_number]))
+                    self.assertEqual(response.url, reverse("orders:detail", args=[self.order.order_number]))
+        self.http.assert_not_called()
+        self.assertEqual(self.order.payments.count(), 1)
+
+    def test_manual_callback_emits_warning_and_never_a_final_success_message(self):
+        self.server_transactions[self.payment.authority]["paidAt"] = "2026-11-14T10:28:00"
+        response = self.client.get(reverse("payments:callback"), self.callback_data(self.payment), follow=True)
+        self.assertEqual(response.redirect_chain, [(reverse("orders:detail", args=[self.order.order_number]), 302)])
+        self.assert_review_page(response)
+        messages = list(response.context["messages"])
+        self.assertTrue(any(message.level_tag == "warning" for message in messages))
+        self.assertFalse(any(message.level_tag == "success" for message in messages))
+
+    def test_stale_annotated_order_cannot_bypass_new_review_during_payment_creation(self):
+        stale = Order.objects.with_payment_review().get(pk=self.order.pk)
+        self.assertFalse(stale.manual_review_pending)
+        self.review()
+        self.http.reset_mock()
+        with self.assertRaises(PaymentError):
+            create_payment_for_order(stale)
+        self.http.assert_not_called()
+        self.assertEqual(self.order.payments.count(), 1)
+
+    def test_failed_or_cancelled_legacy_callback_preserves_other_manual_receipt(self):
+        old_attempt = self.historical_payment()
+        receipt = self.review()
+        for outcome in ("failed", "cancelled"):
+            with self.subTest(outcome=outcome):
+                self.set_outcome(old_attempt, outcome)
+                response = self.client.get(reverse("payments:callback"), self.callback_data(old_attempt, outcome))
+                self.assertEqual(response.url, reverse("orders:detail", args=[self.order.order_number]))
+                self.order.refresh_from_db()
+                self.assertEqual(self.order.payment_status, PaymentStatus.MANUAL_REVIEW)
+                self.assertEqual(self.order.status, OrderStatus.PENDING_PAYMENT)
+                receipt.refresh_from_db()
+                self.assertEqual(receipt.metadata["decision"]["reason"], "timezone_unconfirmed")
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+
+    def test_conflicting_inquiry_preserves_review_order_and_original_decision(self):
+        first = self.review(legacy=True)
+        original_decision = json.loads(json.dumps(first.metadata["decision"]))
+        self.set_outcome(self.payment, "failed")
+        conflict = process_callback(self.payment, self.callback_data(self.payment))
+        self.assertEqual(conflict.status, PaymentStatus.MANUAL_REVIEW)
+        self.assertFalse(conflict.needs_refund)
+        self.assertEqual(conflict.paid_at, first.paid_at)
+        self.assertEqual(conflict.reference_id, first.reference_id)
+        self.assertIn(original_decision, [entry["data"] for entry in conflict.metadata["decision_history"]])
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.payment_status, PaymentStatus.MANUAL_REVIEW)
+        self.server_transactions[self.payment.authority].update(status=2, paidAt="2026-11-14T10:28:00Z")
+        with patch("payments.services.mark_order_paid", wraps=mark_order_paid) as paid:
+            retried = process_callback(self.payment, self.callback_data(self.payment))
+        paid.assert_not_called()
+        self.assertEqual(retried.metadata["decision"]["reason"], "previous_receipt_conflict")
+        self.assertFalse(Order.objects.get(pk=self.order.pk).is_paid)
+
+    def test_failed_attempt_cannot_clear_an_order_review_without_validated_receipt_resolution(self):
+        Order.objects.filter(pk=self.order.pk).update(payment_status=PaymentStatus.MANUAL_REVIEW)
+        self.set_outcome(self.payment, "failed")
+        process_callback(self.payment, self.callback_data(self.payment))
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.payment_status, PaymentStatus.MANUAL_REVIEW)
+        self.assertEqual(self.order.status, OrderStatus.PENDING_PAYMENT)
+        self.assertFalse(self.order.can_pay)
+        self.assertFalse(self.order.inventory_released)
+
+    def test_additional_review_does_not_downgrade_a_legitimately_paid_order(self):
+        primary = process_callback(self.payment, self.callback_data(self.payment))
+        extra = self.historical_payment()
+        self.server_transactions[extra.authority]["paidAt"] = "2026-11-14T10:28:00"
+        process_callback(extra, self.callback_data(extra))
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.payment_status, PaymentStatus.SUCCESSFUL)
+        self.assertEqual(self.order.status, OrderStatus.PAID)
+        self.assertEqual(self.order.paid_at, primary.paid_at)
+        self.assertEqual(self.order.display_payment_status, PaymentStatus.SUCCESSFUL)
+        response = self.client.get(reverse("orders:detail", args=[self.order.order_number]))
+        self.assertContains(response, "یکی از پرداخت‌های این سفارش نیازمند بررسی پشتیبانی است")
+        self.assertNotContains(response, "در انتظار پرداخت")
+        self.assertFalse(self.order.can_pay)
+
+    def test_admin_lists_filters_and_dashboard_agree_for_a_legacy_review(self):
+        from common.dashboard import build_dashboard_context
+        self.review(legacy=True)
+        staff = User.objects.create_superuser(phone_number="09120001234", password="isolated-test-only")
+        self.client.force_login(staff)
+        order_url = reverse("admin:orders_order_changelist")
+        response = self.client.get(order_url)
+        self.assertContains(response, 'class="field-payment_status_display">نیازمند بررسی پشتیبانی</td>')
+        self.assertContains(response, 'class="field-order_status_display">نیازمند بررسی پشتیبانی</td>')
+        response = self.client.get(order_url, {"payment_status__exact": PaymentStatus.MANUAL_REVIEW})
+        self.assertEqual(response.context["cl"].result_count, 1)
+        response = self.client.get(order_url, {"payment_status__exact": PaymentStatus.PENDING})
+        self.assertEqual(response.context["cl"].result_count, 0)
+        response = self.client.get(reverse("admin:payments_payment_changelist"), {"status__exact": PaymentStatus.MANUAL_REVIEW})
+        self.assertEqual(response.context["cl"].result_count, 1)
+        self.assertContains(response, 'class="field-status_display">نیازمند بررسی پشتیبانی</td>')
+        response = self.client.get(reverse("admin:orders_order_change", args=[self.order.pk]))
+        self.assertContains(response, 'field-payment_status_display')
+        self.assertContains(response, "نیازمند بررسی پشتیبانی")
+        dashboard = build_dashboard_context(staff)["dashboard"]
+        self.assertEqual(dashboard["manual_review_orders"], 1)
+        self.assertEqual(dashboard["pending_payment_orders"], 0)
+        self.assertEqual(dashboard["paid_orders"], 0)
+        self.assertEqual(dashboard["total_sales"], 0)
+        self.assertEqual(dashboard["recent_orders"][0].display_status, PaymentStatus.MANUAL_REVIEW)
+
+
+class StoredEvidenceInspectionTests(PaymentFixtureMixin, PaymentTestCase):
+    def setUp(self):
+        super().setUp()
+        self.build_payment_data()
+        self.payment = self.start_payment()
+        self.server_transactions[self.payment.authority]["paidAt"] = "2026-11-14T10:28:00.136000"
+        self.payment = process_callback(self.payment, self.callback_data(self.payment))
+        self.http.reset_mock()
+
+    def inspect(self):
+        output = io.StringIO()
+        call_command("inspect_zibal_payment", payment_id=self.payment.pk, stdout=output)
+        self.output = output.getvalue()
+        return json.loads(self.output)
+
+    def test_local_evidence_reports_missing_track_as_not_returned_and_never_calls_gateway(self):
+        before = Payment.objects.values().get(pk=self.payment.pk)
+        order_before = Order.objects.values().get(pk=self.order.pk)
+        report = self.inspect()
+        self.assertEqual(report["verification"]["result"], 100)
+        self.assertEqual(report["verification"]["verify_result"], 100)
+        self.assertEqual(report["verification"]["status"], 1)
+        self.assertEqual(report["verification"]["paidAt"], "2026-11-14T10:28:00.136000")
+        self.assertFalse(report["verification"]["track_id_present"])
+        self.assertEqual(report["verification"]["track_id_comparison"], "not_returned")
+        self.assertEqual(report["verification"]["transaction_id_comparison"], "matched")
+        self.assertEqual(report["verification"]["reference_comparison"], "matched")
+        self.assertTrue(report["verification"]["amount_matches"])
+        self.assertTrue(report["verification"]["order_id_matches"])
+        self.assertEqual(report["verification"]["payment_time"]["reason"], "timezone_unconfirmed")
+        self.assertEqual(report["decision"]["reason"], "timezone_unconfirmed")
+        self.assertNotIn(self.payment.authority, self.output)
+        self.assertNotIn(str(self.payment.request_id), self.output)
+        self.http.assert_not_called()
+        self.assertEqual(Payment.objects.values().get(pk=self.payment.pk), before)
+        self.assertEqual(Order.objects.values().get(pk=self.order.pk), order_before)
+
+    def test_track_type_normalization_distinguishes_real_mismatch_and_invalid_values(self):
+        for value, comparison in (
+            (int(self.payment.authority), "matched"), (self.payment.authority, "matched"),
+            (int(self.payment.authority) + 1, "mismatch"), (None, "invalid"), (True, "invalid"), ("01", "invalid"),
+        ):
+            with self.subTest(value=value):
+                self.payment.metadata["verification"]["trackId"] = value
+                self.payment.save(update_fields=["metadata"])
+                report = self.inspect()
+                self.assertTrue(report["verification"]["track_id_present"])
+                self.assertEqual(report["verification"]["track_id_type"], type(value).__name__)
+                self.assertEqual(report["verification"]["track_id_comparison"], comparison)
+        self.http.assert_not_called()
+
+    def test_unexpected_private_payload_and_history_are_never_printed(self):
+        private = "synthetic-private-merchant-card-customer-payload"
+        self.payment.metadata["verification"].update(merchant=private, cardNumber=private, message=private, paidAt=private)
+        self.payment.metadata["verification"]["payment_time"].update(reason=private, timezone=private, normalized_paid_at=private)
+        self.payment.metadata["decision"]["reason"] = private
+        self.payment.metadata["verification_history"] = [{"data": {"merchant": private, "payment_time": {"reason": private}}}]
+        self.payment.save(update_fields=["metadata"])
+        report = self.inspect()
+        self.assertNotIn(private, self.output)
+        self.assertNotIn(self.customer.phone_number, self.output)
+        self.assertNotIn("cardNumber", self.output)
+        self.assertNotIn(self.payment.authority, self.output)
+        self.assertEqual(report["history_counts"]["verification_history"], 1)
+        self.http.assert_not_called()
+
+    def test_unknown_or_historical_payment_is_rejected_without_gateway_operations(self):
+        with self.assertRaises(CommandError):
+            call_command("inspect_zibal_payment", payment_id=999999, stdout=io.StringIO())
+        Payment.objects.filter(pk=self.payment.pk).update(gateway="legacy-provider")
+        with self.assertRaises(CommandError):
+            self.inspect()
+        self.http.assert_not_called()
+
+
+class PaymentStatusBadgeTests(SimpleTestCase):
+    def test_every_payment_status_has_a_persian_badge_including_order_review(self):
+        from django.template.loader import render_to_string
+        labels = {"pending": "در انتظار پرداخت", "successful": "موفق", "failed": "ناموفق",
+                  "cancelled": "لغو شده", "expired": "منقضی شده", "manual_review": "نیازمند بررسی پشتیبانی"}
+        for status in PaymentStatus.values:
+            with self.subTest(status=status):
+                content = render_to_string("partials/status_badge.html", {"kind": "payment", "status": status})
+                self.assertIn(labels[status], content)
+        content = render_to_string("partials/status_badge.html", {"kind": "order", "status": PaymentStatus.MANUAL_REVIEW})
+        self.assertIn(labels["manual_review"], content)
+        self.assertNotIn("در انتظار پرداخت", content)
