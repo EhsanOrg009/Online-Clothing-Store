@@ -489,19 +489,21 @@ The main CSS source file is `assets/css/app.css`. In Tailwind CSS v4, custom uti
 ---
 ## 📱 SMS Provider Configuration
 
-SMS delivery is abstracted behind a provider interface. The OTP authentication flow does not need to depend on a specific SMS vendor.
+SMS delivery is abstracted behind a provider interface (`SMSProvider`). The OTP authentication flow does not depend directly on a specific SMS vendor.
 
-Configure the provider in `.env`:
+Configure the active provider in `.env`:
 
 ```env
 SMS_PROVIDER=console
 # SMS_PROVIDER=memory
-# SMS_PROVIDER=myapp.sms.KavenegarProvider
+# SMS_PROVIDER=sms_ir
+# SMS_PROVIDER=myapp.sms.CustomProvider
 ```
 
-- `console` prints OTP messages to the development server terminal.
-- `memory` is intended for tests or in-memory development scenarios.
-- A custom provider path can be configured for a real SMS service.
+- `console`: Prints OTP messages to the development server terminal. Blocked in production (`DEBUG=False`).
+- `memory`: In-memory outbox intended for automated tests and isolated QA.
+- `sms_ir`: Built-in production integration with SMS.ir REST API v1 (`/send/verify`) for template-based OTP delivery.
+- Custom provider: Any class implementing `accounts.sms.base.SMSProvider` can be referenced by its Python import path.
 
 Related OTP settings:
 
@@ -513,7 +515,48 @@ OTP_RESEND_SECONDS=90
 OTP_RESEND_LIMIT_PER_HOUR=5
 ```
 
-### Add a real SMS provider
+### SMS.ir Integration (Production OTP Provider)
+
+The project includes a built-in provider for [SMS.ir](https://sms.ir/rest-api/) using the REST v1 Fast Send / Verify endpoint (`POST https://api.sms.ir/v1/send/verify`).
+
+#### 1. Obtain API Key from SMS.ir Panel
+1. Sign in to your dashboard on [sms.ir](https://sms.ir).
+2. Navigate to the developer / API Keys section.
+3. Create a new API Key and copy the key value. This key is used in the `X-API-KEY` request header.
+
+#### 2. Create and Configure an OTP Template
+1. In the SMS.ir dashboard, navigate to the verification templates section (Send Verify / Templates).
+2. Create a new template for OTP login.
+3. Example approved template text:
+   ```text
+   پوشاک لوکس: کد ورود شما #Code# است.
+   ```
+   In SMS.ir, dynamic parameters in the template text are enclosed by `#` characters (e.g., `#Code#`).
+
+#### 3. Obtain Numeric Template ID and Parameter Name
+- **Template ID**: After the template is approved, the panel displays a numeric ID (e.g. `123456`). Copy this number to `SMS_IR_TEMPLATE_ID`.
+- **Parameter Name**: The parameter name in Django must match the variable name configured in the SMS.ir panel without `#` characters. For `#Code#`, the parameter name is `Code`.
+
+#### 4. Configure Environment Variables
+Set the following variables in `.env` (or `.env.production`):
+
+```env
+SMS_PROVIDER=sms_ir
+SMS_IR_API_KEY=your_actual_sms_ir_api_key
+SMS_IR_TEMPLATE_ID=123456
+SMS_IR_OTP_PARAMETER_NAME=Code
+SMS_IR_TIMEOUT_SECONDS=10
+```
+
+#### 5. Safety and Testing
+- **Local Testing & Automated Tests**: All automated tests mock external HTTP communication. Run tests safely without consuming credit:
+  ```bash
+  PYTHONPATH=scripts/qa uv run python manage.py test --settings=shop_test_settings accounts
+  ```
+- **Real-World Verification**: During development, keep `SMS_PROVIDER=console` to print codes to the terminal. In staging or production, activate `SMS_PROVIDER=sms_ir` with valid credentials. The provider automatically masks recipient phone numbers in application logs (e.g. `0912***6789`) and never logs raw OTP codes or API keys.
+- **Production Validation**: In production (`DJANGO_SETTINGS_MODULE=config.settings.production`), setting `SMS_PROVIDER=sms_ir` validates that `SMS_IR_API_KEY` and a positive `SMS_IR_TEMPLATE_ID` are configured, preventing startup with missing credentials.
+
+### Add a custom SMS provider
 
 Create a class that implements the project's `SMSProvider` interface, then set `SMS_PROVIDER` to its Python import path. For example:
 
@@ -522,15 +565,13 @@ Create a class that implements the project's `SMSProvider` interface, then set `
 from accounts.sms.base import SMSProvider
 
 
-class KavenegarProvider(SMSProvider):
-    name = "kavenegar"
+class CustomSMSProvider(SMSProvider):
+    name = "custom"
 
     def send(self, phone_number: str, message: str) -> None:
-        # Call the SMS provider's HTTP API here.
+        # Call custom SMS vendor API here
         ...
 ```
-
-The example above is a template, not a complete provider integration. Add real API handling, error handling, and credential configuration before using a provider in production. An invalid import path should be handled with a clear provider-configuration error.
 
 ---
 ## 💳 Payment Gateway Configuration

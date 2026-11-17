@@ -22,6 +22,10 @@ class SMSProvider(ABC):
     def send(self, phone_number: str, message: str) -> None:
         """ارسال یک پیامک متنی به شماره داده‌شده."""
 
+    def send_otp(self, phone_number: str, code: str, message: str) -> None:
+        """ارسال کد یک‌بارمصرف (OTP). پیش‌فرض: ارجاع به send متنی."""
+        self.send(phone_number, message)
+
     @classmethod
     def describe(cls) -> str:
         return cls.name

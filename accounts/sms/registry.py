@@ -8,10 +8,12 @@ from django.utils.module_loading import import_string
 from .base import SMSProvider, SMSProviderError
 from .console import ConsoleSMSProvider
 from .memory import InMemorySMSProvider
+from .sms_ir import SMSIRProvider
 
 _BUILTIN_PROVIDERS: dict[str, type[SMSProvider]] = {
     ConsoleSMSProvider.name: ConsoleSMSProvider,
     InMemorySMSProvider.name: InMemorySMSProvider,
+    SMSIRProvider.name: SMSIRProvider,
 }
 
 _cached_provider: SMSProvider | None = None

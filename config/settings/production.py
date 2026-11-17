@@ -49,6 +49,13 @@ if PAYMENT_GATEWAY not in ("zibal", "payments.gateways.zibal.ZibalGateway"):
     raise ImproperlyConfigured("PAYMENT_GATEWAY must select Zibal in production.")
 if not ZIBAL_MERCHANT.strip() or ZIBAL_MERCHANT.strip() == "zibal":
     raise ImproperlyConfigured("ZIBAL_MERCHANT must identify a real production merchant.")
+if SMS_PROVIDER in ("sms_ir", "accounts.sms.sms_ir.SMSIRProvider"):
+    if not SMS_IR_API_KEY.strip():
+        raise ImproperlyConfigured("SMS_IR_API_KEY must be set when SMS_PROVIDER is 'sms_ir'.")
+    if not SMS_IR_TEMPLATE_ID or int(SMS_IR_TEMPLATE_ID) <= 0:
+        raise ImproperlyConfigured("SMS_IR_TEMPLATE_ID must be a positive integer when SMS_PROVIDER is 'sms_ir'.")
+    if not SMS_IR_OTP_PARAMETER_NAME.strip():
+        raise ImproperlyConfigured("SMS_IR_OTP_PARAMETER_NAME must not be empty when SMS_PROVIDER is 'sms_ir'.")
 if "*" in ALLOWED_HOSTS:
     raise ImproperlyConfigured("Wildcard ALLOWED_HOSTS is forbidden in production.")
 

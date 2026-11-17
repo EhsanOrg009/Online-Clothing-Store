@@ -123,7 +123,7 @@ def request_otp(raw_phone: str, ip_address: str | None = None) -> tuple[str, OTP
 
     message = _message_template(code)
     try:
-        get_sms_provider().send(phone, message)
+        get_sms_provider().send_otp(phone, code, message)
     except SMSProviderError as exc:
         challenge.delete()
         logger.warning("ارسال پیامک برای شماره %s ناموفق بود: %s", phone, exc)

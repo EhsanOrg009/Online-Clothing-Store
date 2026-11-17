@@ -244,6 +244,26 @@ ORDER_RESERVATION_MINUTES = env.int("ORDER_RESERVATION_MINUTES", default=30)
 
 # OTP / SMS
 SMS_PROVIDER = env("SMS_PROVIDER", default="console")
+SMS_IR_API_KEY = env("SMS_IR_API_KEY", default=env("SMS_API_KEY", default=""))
+_sms_ir_template_id_raw = env("SMS_IR_TEMPLATE_ID", default="")
+try:
+    SMS_IR_TEMPLATE_ID = (
+        int(str(_sms_ir_template_id_raw).strip())
+        if str(_sms_ir_template_id_raw).strip()
+        else 0
+    )
+except (ValueError, TypeError):
+    SMS_IR_TEMPLATE_ID = 0
+SMS_IR_OTP_PARAMETER_NAME = env("SMS_IR_OTP_PARAMETER_NAME", default="Code")
+_sms_ir_timeout_raw = env("SMS_IR_TIMEOUT_SECONDS", default="10")
+try:
+    SMS_IR_TIMEOUT_SECONDS = (
+        float(str(_sms_ir_timeout_raw).strip())
+        if str(_sms_ir_timeout_raw).strip()
+        else 10.0
+    )
+except (ValueError, TypeError):
+    SMS_IR_TIMEOUT_SECONDS = 10.0
 SMS_API_KEY = env("SMS_API_KEY", default="")
 SMS_API_SECRET = env("SMS_API_SECRET", default="")
 SMS_SENDER = env("SMS_SENDER", default="")
