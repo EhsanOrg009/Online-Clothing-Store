@@ -2,18 +2,21 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+import io
 from threading import Event
 
 from django.db import close_old_connections, connection, transaction
+from django.core.management import call_command
 from django.test import TransactionTestCase, override_settings, skipUnlessDBFeature
 from django.utils import timezone
 
 from orders.models import Order
 from orders.services import expire_due_orders
-from payments.models import Payment
+from payments.models import Payment, PaymentMaintenanceJob
 from payments.services import PaymentError, create_payment_for_order, process_callback
 from payments.tests import PaymentFixtureMixin
-from payments.torobpay_services import reconcile_payment
+from payments.torobpay_services import _begin_step, _claim, reconcile_payment
+from unittest.mock import patch
 from payments.torobpay_test_support import CPGHTTPStubMixin, TOROBPAY_TEST_SETTINGS
 
 
@@ -118,7 +121,8 @@ class CPGConcurrencyTests(PaymentFixtureMixin, CPGHTTPStubMixin, TransactionTest
                 self.assertTrue(started.wait(10))
                 current = Payment.objects.get(pk=payment.pk)
                 current.metadata["torobpay"]["active_operation"]["started_at"] = (timezone.now() - timedelta(minutes=5)).isoformat()
-                current.save(update_fields=["metadata"])
+                current.reconciliation_lease_expires_at = timezone.now() - timedelta(seconds=1)
+                current.save(update_fields=["metadata", "reconciliation_lease_expires_at"])
                 newer = reconcile_payment(current)
                 self.assertTrue(newer.is_successful)
             finally:
@@ -152,3 +156,103 @@ class CPGConcurrencyTests(PaymentFixtureMixin, CPGHTTPStubMixin, TransactionTest
         self.assertFalse(self.order.inventory_released)
         self.assertFalse(self.order.is_paid)
         self.assertTrue(Payment.objects.get().provider_token)
+
+    def test_in_time_observation_survives_real_order_lock_race_with_expiration(self):
+        from payments.torobpay_services import _end_step
+        deadline = timezone.now() + timedelta(seconds=10)
+        Order.objects.filter(pk=self.order.pk).update(expires_at=deadline)
+        payment = self.start()
+        self.outcome(payment, "ONGOING")
+        observed, write_started, release = Event(), Event(), Event()
+        clock, times = [deadline - timedelta(seconds=1)], []
+
+        def delayed(*args, **kwargs):
+            times.append(kwargs["observed_at"])
+            observed.set()
+            self.assertTrue(release.wait(10))
+            write_started.set()
+            return _end_step(*args, **kwargs)
+
+        with patch("payments.torobpay_services.timezone.now", side_effect=lambda: clock[0]), \
+                patch("payments.torobpay_services._end_step", side_effect=delayed), ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(self.worker, lambda: reconcile_payment(payment))
+            try:
+                self.assertTrue(observed.wait(10))
+                with transaction.atomic():
+                    Order.objects.select_for_update().get(pk=self.order.pk)
+                    # This deliberately delays DB application after the API
+                    # response has been received, validated and timestamped.
+                    clock[0] = deadline + timedelta(seconds=1)
+                    release.set()
+                    self.assertTrue(write_started.wait(10))
+                    expiration = pool.submit(self.worker, expire_due_orders)
+                result = first.result(20)
+                self.assertEqual(expiration.result(20), 0)
+            finally:
+                release.set()
+        self.assertTrue(result.is_successful)
+        self.assertEqual(result.settle_confirmed_at, times[0])
+        self.assertEqual(times[0], deadline - timedelta(seconds=1))
+        self.assertIsNone(result.gateway_paid_at)
+        self.order.refresh_from_db()
+        self.assertTrue(self.order.is_paid)
+        self.assertFalse(self.order.inventory_released)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 4)
+        self.assertEqual(len(self.api_calls("status")), 1)
+
+    def test_two_scheduler_invocations_do_not_process_payment_twice(self):
+        payment = self.start()
+        self.outcome(payment, "W_FOR_VERIFY")
+        started, release = Event(), Event()
+
+        def slow(record):
+            response = self.server_response(record, "status")
+            started.set()
+            self.assertTrue(release.wait(10))
+            return response
+
+        def tick():
+            output = io.StringIO()
+            call_command("run_payment_maintenance", apply=True, stdout=output)
+            return output.getvalue()
+
+        self.responses["status"] = [slow]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(self.worker, tick)
+            try:
+                self.assertTrue(started.wait(10))
+                second = pool.submit(self.worker, tick)
+                self.assertIn("اجرای دیگری فعال", second.result(10))
+                self.assertEqual(len(self.api_calls("status")), 1)
+                with transaction.atomic():
+                    Order.objects.select_for_update(nowait=True).get(pk=self.order.pk)
+                    Payment.objects.select_for_update(nowait=True).get(pk=payment.pk)
+            finally:
+                release.set()
+            first.result(20)
+        payment.refresh_from_db()
+        self.assertTrue(payment.is_successful)
+        first_time = payment.settle_confirmed_at
+        call_command("run_payment_maintenance", apply=True, stdout=io.StringIO())
+        payment.refresh_from_db()
+        self.assertEqual(payment.settle_confirmed_at, first_time)
+        self.assertEqual(len(self.api_calls("verify")), 1)
+        self.assertEqual(len(self.api_calls("settle")), 1)
+        self.assertIsNotNone(PaymentMaintenanceJob.objects.get().last_success_at)
+
+    def test_expiration_reclaims_crashed_read_lease_only_after_definitive_unpaid_status(self):
+        payment = self.start()
+        _, lease = _claim(payment, "reconcile")
+        _begin_step(lease, "status")
+        self.outcome(payment, "FAILED")
+        Payment.objects.filter(pk=payment.pk).update(reconciliation_lease_expires_at=timezone.now() - timedelta(seconds=1))
+        Order.objects.filter(pk=self.order.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+        self.assertEqual(expire_due_orders(), 1)
+        self.assertEqual(expire_due_orders(), 0)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, "failed")
+        self.assertIsNone(payment.reconciliation_lease_expires_at)
+        self.assertIsNone(payment.settle_confirmed_at)
+        self.variant.refresh_from_db()
+        self.assertEqual(self.variant.stock, 5)

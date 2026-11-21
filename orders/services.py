@@ -11,11 +11,14 @@
 from __future__ import annotations
 
 import logging
+import time
+from itertools import islice
 from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import QuerySet
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -292,7 +295,8 @@ def _apply_cancellation(order: Order, *, mark_payment_cancelled: bool) -> None:
     فقط Instance را در حافظه تغییر می‌دهد؛ ذخیره‌سازی بر عهده فراخواننده است تا
     هر مسیر (لغو مستقیم یا گذار وضعیت) بتواند `update_fields` خودش را انتخاب کند.
     """
-    if order.payments.filter(reservation_hold=True).exists():
+    from payments.services import inventory_release_blocked
+    if inventory_release_blocked(order):
         raise OrderError(_("لغو این سفارش ابتدا به تأیید لغو یا بازپرداخت درگاه نیاز دارد؛ با پشتیبانی پیگیری کنید."))
     from payments.services import potentially_successful_receipt
     for payment in order.payments.filter(metadata__requires_remote_cancellation=True).order_by("pk"):
@@ -331,24 +335,42 @@ def cancel_order(order: Order, *, mark_payment_cancelled: bool = False) -> Order
     return original
 
 
-def expire_due_orders() -> int:
+def expire_due_orders(*, limit=None, max_runtime_seconds=None, heartbeat=None, raise_on_error=False) -> int:
     """
     انقضای سفارش‌های پرداخت‌نشده: لغو + آزادسازی موجودی.
 
-    این تابع باید به‌صورت دوره‌ای (مثلاً هر ۵ دقیقه با cron) اجرا شود:
+    این تابع در مرزهای پنج‌دقیقه‌ای توسط وظیفهٔ نگهداری پرداخت اجرا می‌شود:
         uv run python manage.py expire_pending_orders
     """
-    expired = 0
+    expired = checked = failures = 0
     now = timezone.now()
-    for order in Order.objects.due_for_expiry(now):
+    deadline = time.monotonic() + max_runtime_seconds if max_runtime_seconds is not None else None
+    candidates = Order.objects.due_for_expiry(now)
+    if isinstance(candidates, QuerySet):
+        candidates = candidates.order_by("expires_at", "pk")
+        if limit is not None:
+            candidates = candidates[:limit]
+        candidates = candidates.iterator(chunk_size=100)
+    elif limit is not None:
+        # Existing callers/tests can supply an already observed snapshot. The
+        # authoritative state is always reloaded under the Order lock below.
+        candidates = islice(candidates, limit)
+    for order in candidates:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        if heartbeat:
+            heartbeat()
+        checked += 1
         try:
             # Reconciliation may perform HTTP. It runs before the Order lock;
             # the hold is rechecked below, including attempts created meanwhile.
-            from payments.services import reconcile_before_inventory_release
-            reconcile_before_inventory_release(order)
+            from payments.services import inventory_release_blocked, reconcile_before_inventory_release
+            reconciled = reconcile_before_inventory_release(order, heartbeat=heartbeat)
+            if not reconciled:
+                failures += 1
             with transaction.atomic():
                 order = Order.objects.select_for_update().get(pk=order.pk)
-                if order.payments.filter(reservation_hold=True).exists():
+                if not reconciled or inventory_release_blocked(order):
                     logger.warning("Order %s retains inventory: remote payment is unresolved", order.order_number)
                     continue
                 if order.payment_status == PaymentStatus.MANUAL_REVIEW or order.payments.filter(status=PaymentStatus.MANUAL_REVIEW).exists():
@@ -372,8 +394,14 @@ def expire_due_orders() -> int:
                 )
             expired += 1
             logger.info("سفارش %s به دلیل عدم پرداخت منقضی شد", order.order_number)
-        except Exception:  # pragma: no cover - ایمنی حلقه
-            logger.exception("خطا در انقضای سفارش %s", order.order_number)
+        except Exception as error:
+            # Preserve the loop's safe stock behavior, but do not swallow job
+            # failure or print arbitrary exception text/provider payloads.
+            failures += 1
+            logger.error("Order expiration failed order_id=%s error_type=%s", order.pk, type(error).__name__)
+    logger.info("Order expiration run checked=%s expired=%s failures=%s", checked, expired, failures)
+    if failures and raise_on_error:
+        raise OrderError(_("بخشی از بررسی انقضای سفارش کامل نشد؛ موجودی پرداخت‌های نامطمئن آزاد نشد."))
     return expired
 
 
@@ -397,7 +425,8 @@ def transition_status(order: Order, new_status: str) -> Order:
         )
     if new_status == OrderStatus.PAID and not order.is_paid:
         raise OrderError(_("پرداخت فقط از طریق تأیید درگاه ثبت می‌شود."))
-    if new_status != OrderStatus.CANCELLED and order.payments.filter(reservation_hold=True).exists():
+    from payments.services import inventory_release_blocked
+    if new_status != OrderStatus.CANCELLED and inventory_release_blocked(order):
         raise OrderError(_("پیش از تغییر مرحلهٔ سفارش، نتیجهٔ عملیات درگاه باید تعیین تکلیف شود."))
     if new_status == OrderStatus.CANCELLED:
         _apply_cancellation(order, mark_payment_cancelled=True)

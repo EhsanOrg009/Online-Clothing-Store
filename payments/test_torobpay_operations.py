@@ -108,6 +108,11 @@ class CPGOperationalTests(CPGTestCase):
                                         selected_track_ids=[zibal.authority], primary=zibal, backup=backup, plan=plan)
         credit.reservation_hold = False
         self.assertNotEqual(receipt_history_fingerprint(history), plan["history_fingerprint"])
+        credit.reconciliation_lease_expires_at = timezone.now() + timedelta(seconds=30)
+        plan["history_fingerprint"] = receipt_history_fingerprint(history)
+        with self.assertRaises(PaymentError):
+            _authorize_recovery_primary(order=self.order, payments=history, verified={zibal.authority: result},
+                                        selected_track_ids=[zibal.authority], primary=zibal, backup=backup, plan=plan)
 
     def test_manual_cancel_requires_backup_before_any_refund_request(self):
         payment = self.pay(self.start())

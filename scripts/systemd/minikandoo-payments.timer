@@ -1,0 +1,12 @@
+[Unit]
+Description=اجرای نگهداری پرداخت مینی‌کندو در هر دقیقه
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=true
+Unit=minikandoo-payments.service
+
+[Install]
+WantedBy=timers.target

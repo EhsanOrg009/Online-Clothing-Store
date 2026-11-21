@@ -1,0 +1,16 @@
+#!/bin/sh
+# Host timer adapter: reuse the existing production web service and env file.
+set -eu
+if [ "$#" -ne 0 ]; then
+    printf 'این اسکریپت آرگومان نمی‌پذیرد؛ تنظیمات وظیفه در فرمان کنترل‌شده ثبت شده‌اند.\n' >&2
+    exit 2
+fi
+TASK_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$TASK_ROOT"
+# The timeout runs INSIDE the container. Killing only docker's client would
+# leave its Django exec process alive. The DB leases remain recoverable after
+# hard termination; no refunds or arbitrary management commands are scheduled.
+exec /bin/sh ./scripts/compose-production exec -T \
+    -e DJANGO_SETTINGS_MODULE=config.settings.production web \
+    timeout --signal=TERM --kill-after=10s 300s \
+    python manage.py run_payment_maintenance --apply --limit 100 --max-runtime-seconds 45

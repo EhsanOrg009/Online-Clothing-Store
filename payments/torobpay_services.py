@@ -12,6 +12,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import Callable
 import hashlib
 import json
 import logging
@@ -59,6 +60,8 @@ class OperationLease:
     identity: str
     previous_hold: bool = False
     previous_status: str = PaymentStatus.PENDING
+    receipt_identity: tuple = ()
+    heartbeat: Callable[[], None] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,28 @@ def _identity(payment):
     return hashlib.sha256(json.dumps(record, default=str, sort_keys=True).encode()).hexdigest()
 
 
+def _receipt_identity(payment):
+    """Provider association, independent of mutable fulfillment state."""
+    data = _data(payment)
+    return (payment.pk, payment.order_id, payment.gateway, payment.request_id,
+            payment.authority, token_fingerprint(payment.provider_token), payment.amount,
+            data.get("amount_toman"), data.get("transaction_id"))
+
+
+def reconciliation_lease_duration():
+    # Covers one bounded authenticated HTTP step plus DB application margin.
+    # Renew before/after each step; a crashed worker cannot keep ownership.
+    return timedelta(seconds=12 * settings.TOROBPAY_TIMEOUT_SECONDS + 60)
+
+
+def confirmation_before_reservation_deadline(order, confirmed_at):
+    """CPG policy only. Zibal's independently documented boundary is unchanged."""
+    deadline = order.expires_at
+    return bool(isinstance(confirmed_at, datetime) and timezone.is_aware(confirmed_at)
+                and isinstance(deadline, datetime) and timezone.is_aware(deadline)
+                and confirmed_at < deadline)
+
+
 def _amount(payment):
     data = _data(payment)
     amount = toman_to_rial(data.get("amount_toman", str(payment.amount)))
@@ -142,7 +167,7 @@ def _validate_status(payment, status, *, update=False):
 
 
 @transaction.atomic
-def _claim(payment, kind, callback=None):
+def _claim(payment, kind, callback=None, *, heartbeat=None):
     payment = _locked(payment.pk)
     previous_hold, previous_status = payment.reservation_hold, payment.status
     data = _data(payment)
@@ -157,15 +182,23 @@ def _claim(payment, kind, callback=None):
         payment.save(update_fields=["callback_count", "metadata"])
         return payment, None
     active = data.get("active_operation", {})
-    lease_seconds = 12 * settings.TOROBPAY_TIMEOUT_SECONDS + 60
+    now = timezone.now()
+    payment.reconciliation_attempted_at = now
     if active.get("status") == "requesting":
-        try:
-            started = datetime.fromisoformat(active["started_at"])
-            busy = timezone.is_aware(started) and timezone.now() - started < timedelta(seconds=lease_seconds)
-        except (ValueError, KeyError, TypeError):
-            busy = True
+        expires = payment.reconciliation_lease_expires_at
+        if expires is None:
+            # Upgrade only a bounded, valid legacy lease. A malformed timestamp
+            # used to remain busy forever; reclaim it with status, never retry.
+            try:
+                started = datetime.fromisoformat(active["started_at"])
+                expires = started + reconciliation_lease_duration() if timezone.is_aware(started) and started <= now else None
+            except (ValueError, KeyError, TypeError):
+                expires = None
+        busy = bool(expires and timezone.is_aware(expires) and now < expires)
         if busy:
-            payment.save(update_fields=["callback_count", "metadata"])
+            payment.reservation_hold = True
+            payment.reconciliation_lease_expires_at = expires
+            payment.save(update_fields=["callback_count", "metadata", "reservation_hold", "reconciliation_lease_expires_at"])
             return payment, None
         mutation = active.get("last_step", {})
         if mutation.get("operation") not in (None, "status") and mutation.get("outcome") == "requesting":
@@ -173,25 +206,35 @@ def _claim(payment, kind, callback=None):
     if not payment.provider_token:
         payment.error_message = "شناسهٔ پرداخت ترب‌پی هنوز ثبت نشده است؛ نتیجه باید توسط پشتیبانی پیگیری شود."
         payment.reservation_hold = payment.creation_status != PaymentCreationStatus.REJECTED
-        payment.save(update_fields=["callback_count", "metadata", "error_message", "reservation_hold"])
+        payment.reconciliation_lease_expires_at = None
+        payment.save(update_fields=["callback_count", "metadata", "error_message", "reservation_hold",
+                                   "reconciliation_lease_expires_at", "reconciliation_attempted_at"])
         return payment, None
     if token_fingerprint(payment.provider_token) != payment.authority:
         data["manual_block"] = "stored_token_mismatch"
         payment.status = PaymentStatus.MANUAL_REVIEW
         payment.error_message = REVIEW_MESSAGE
         payment.reservation_hold = True
-        payment.save(update_fields=["callback_count", "metadata", "status", "error_message", "reservation_hold"])
+        payment.reconciliation_lease_expires_at = None
+        payment.save(update_fields=["callback_count", "metadata", "status", "error_message", "reservation_hold",
+                                   "reconciliation_lease_expires_at", "reconciliation_attempted_at"])
         _sync_order_payment_review(payment.order)
         return payment, None
     if active:
         data.setdefault("operation_history", []).append(deepcopy(active))
     operation_id = str(uuid4())
+    payment.reconciliation_lease_expires_at = now + reconciliation_lease_duration()
     data["active_operation"] = {"id": operation_id, "kind": kind, "status": "requesting",
-                                 "started_at": timezone.now().isoformat(), "steps": []}
-    if kind in ("cancel", "update"):
-        payment.reservation_hold = True
-    payment.save(update_fields=["callback_count", "metadata", "reservation_hold"])
-    return payment, OperationLease(payment, operation_id, _identity(payment), previous_hold, previous_status)
+                                 "started_at": now.isoformat(), "steps": [],
+                                 "lease_expires_at": payment.reconciliation_lease_expires_at.isoformat()}
+    # Persist protection under Order -> Payment locks BEFORE any remote HTTP.
+    # Financial uncertainty can outlive this bounded processing lease; only a
+    # matching final status or authorized review releases that separate hold.
+    payment.reservation_hold = True
+    payment.save(update_fields=["callback_count", "metadata", "reservation_hold",
+                               "reconciliation_lease_expires_at", "reconciliation_attempted_at"])
+    return payment, OperationLease(payment, operation_id, _identity(payment), previous_hold, previous_status,
+                                   _receipt_identity(payment), heartbeat)
 
 
 def _check_lease(payment, lease):
@@ -199,51 +242,97 @@ def _check_lease(payment, lease):
         raise ReconciliationConflict("operation_lease_changed")
     if _identity(payment) != lease.identity:
         raise ReconciliationConflict("identity_changed_during_http")
+    if not payment.reconciliation_lease_expires_at or timezone.now() >= payment.reconciliation_lease_expires_at:
+        raise ReconciliationConflict("operation_lease_expired")
 
 
 @transaction.atomic
 def _begin_step(lease, operation):
     payment = _locked(lease.payment.pk)
     _check_lease(payment, lease)
-    step = {"operation": operation, "started_at": timezone.now().isoformat(), "outcome": "requesting"}
+    now = timezone.now()
+    payment.reconciliation_lease_expires_at = now + reconciliation_lease_duration()
+    step = {"operation": operation, "started_at": now.isoformat(), "outcome": "requesting"}
     _data(payment)["active_operation"]["last_step"] = step
-    payment.save(update_fields=["metadata"])
+    _data(payment)["active_operation"]["lease_expires_at"] = payment.reconciliation_lease_expires_at.isoformat()
+    payment.save(update_fields=["metadata", "reconciliation_lease_expires_at"])
     lease.payment = payment
 
 
 @transaction.atomic
-def _end_step(lease, operation, *, outcome="confirmed", status=None, transaction_id=None, error=None):
+def _end_step(lease, operation, *, observed_at, outcome="confirmed", status=None, transaction_id=None, error=None):
     payment = _locked(lease.payment.pk)
     data = _data(payment)
     if data.get("active_operation", {}).get("id") != lease.operation_id:
         # A stale HTTP response may arrive after another worker reconciled the
         # expired lease. Preserve evidence without changing its newer decision.
         audit = {"operation_id": lease.operation_id, "operation": operation, "outcome": outcome,
-                 "observed_at": timezone.now().isoformat(), "code": getattr(error, "code", None)}
+                 "observed_at": observed_at.isoformat(), "recorded_at": timezone.now().isoformat(),
+                 "code": getattr(error, "code", None)}
         if status:
             audit.update(api_status=status.status, amount_rial=status.amount_rial)
+            if outcome == "confirmed":
+                audit["transaction_id"] = status.transaction_id
+            else:
+                audit["transaction_id_fingerprint"] = hashlib.sha256(status.transaction_id.encode()).hexdigest()
         data.setdefault("stale_responses", []).append(audit)
         payment.save(update_fields=["metadata"])
         lease.payment = payment
         return False
-    step = {**data["active_operation"]["last_step"], "outcome": outcome, "observed_at": timezone.now().isoformat()}
+    recorded_at = timezone.now()
+    try:
+        receipt_matches = _receipt_identity(payment) == lease.receipt_identity
+        identity_matches = _identity(payment) == lease.identity
+    except (PaymentGatewayError, ReconciliationConflict):
+        receipt_matches = identity_matches = False
+    step = {**data["active_operation"]["last_step"], "outcome": outcome,
+            "observed_at": observed_at.isoformat(), "recorded_at": recorded_at.isoformat(),
+            "receipt_identity_matches": receipt_matches}
+    if lease.receipt_identity:
+        step.update(expected_payment_id=lease.receipt_identity[0], expected_order_id=lease.receipt_identity[1])
+    payment.reconciliation_lease_expires_at = recorded_at + reconciliation_lease_duration()
+    data["active_operation"]["lease_expires_at"] = payment.reconciliation_lease_expires_at.isoformat()
     if error is not None:
         step.update(code=getattr(error, "code", None), http_status=getattr(error, "http_status", None))
     if outcome == "unknown" and operation != "status":
         data["uncertain_mutation"] = {"operation": operation, "operation_id": lease.operation_id}
     if status:
-        step.update(api_status=status.status, amount_rial=status.amount_rial, transaction_matches=True)
+        status_matches = outcome == "confirmed" and receipt_matches
+        if status_matches:
+            try:
+                _validate_status(payment, status, update=bool(data.get("pending_update")))
+            except ReconciliationConflict:
+                status_matches = False
+        step.update(api_status=status.status, amount_rial=status.amount_rial, identity_validated=status_matches)
+        if status_matches:
+            step["transaction_id"] = status.transaction_id
+        if not status_matches:
+            # An untrusted identifier can echo a credential. Preserve only its
+            # digest; validated merchant transaction IDs remain in real evidence.
+            fingerprint = hashlib.sha256(status.transaction_id.encode()).hexdigest()
+            step["transaction_id_fingerprint"] = fingerprint
+            data["last_unvalidated_response"] = {"api_status": status.status, "amount_rial": status.amount_rial,
+                "transaction_id_fingerprint": fingerprint, "observed_at": observed_at.isoformat()}
+    if status and status_matches:
         data["api_status"] = status.status
         if status.status == "VERIFY":
             data.update(last_known_order_state="W_FOR_SETTLE", receipt_seen=True)
             payment.verified_at = payment.verified_at or timezone.now()
         elif status.status == "SETTLE":
             data["receipt_seen"] = True
-            # Persist the first authoritative settled observation, not callback
-            # time, verify time, order creation time or an invented gateway time.
+            # Observation was captured after response validation, before waiting
+            # for DB locks. Revalidate association under the lock and write once.
+            # Legacy JSON records only DB write time; do not invent a historical
+            # observation or silently promote an incomplete legacy receipt.
+            if (not data.get("pending_update") and payment.settle_confirmed_at is None
+                    and not data.get("settlement_evidence") and receipt_matches):
+                payment.settle_confirmed_at = observed_at
+                data["settlement_evidence"] = {"source": "server_api_response", "observed_at": observed_at.isoformat(),
+                    "recorded_at": recorded_at.isoformat(), "amount_rial": status.amount_rial,
+                    "transaction_id": status.transaction_id, "order_id": payment.order_id, "payment_id": payment.pk,
+                    "request_id": str(payment.request_id), "token_fingerprint": payment.authority,
+                    "reservation_expires_at": payment.order.expires_at.isoformat() if payment.order.expires_at else None}
             if not data.get("pending_update"):
-                data.setdefault("settlement_evidence", {"observed_at": step["observed_at"],
-                    "amount_rial": status.amount_rial, "transaction_id": status.transaction_id})
                 payment.paid_at = payment.paid_at or timezone.now()
         uncertain = data.get("uncertain_mutation", {}).get("operation")
         if (uncertain == "verify" and status.status in ("VERIFY", "SETTLE", "REVERT")) or (
@@ -262,30 +351,40 @@ def _end_step(lease, operation, *, outcome="confirmed", status=None, transaction
             data["pending_update"]["response_transaction_id"] = transaction_id
     data["active_operation"]["last_step"] = step
     data["active_operation"]["steps"].append(step)
-    payment.save(update_fields=["metadata", "verified_at", "paid_at"])
+    payment.save(update_fields=["metadata", "verified_at", "paid_at", "settle_confirmed_at", "reconciliation_lease_expires_at"])
     lease.payment = payment
     # Return the conflict after committing the audit, never raise inside this
     # transaction and accidentally roll back a remotely successful operation.
-    return _identity(payment) == lease.identity
+    return identity_matches and (status is None or status_matches)
 
 
 def _perform(lease, operation, action, *, update=False):
+    if lease.heartbeat:
+        lease.heartbeat()
     _begin_step(lease, operation)
     try:
         result = action(lease.payment)
         if isinstance(result, RemoteStatus):
-            _validate_status(lease.payment, result, update=update)
-            identity_matches = _end_step(lease, operation, status=result)
+            try:
+                _validate_status(lease.payment, result, update=update)
+            except ReconciliationConflict:
+                # Preserve sanitized conflicting evidence, without creating an
+                # authoritative confirmation timestamp or advancing a receipt.
+                _end_step(lease, operation, outcome="mismatch", status=result, observed_at=timezone.now())
+                raise
+            observed_at = timezone.now()
+            identity_matches = _end_step(lease, operation, status=result, observed_at=observed_at)
         else:
             transaction_id = result.transaction_id if hasattr(result, "transaction_id") else result
             if operation != "update" and transaction_id != _transaction_id(lease.payment):
                 raise ReconciliationConflict("remote_transaction_mismatch")
-            identity_matches = _end_step(lease, operation, transaction_id=transaction_id)
+            identity_matches = _end_step(lease, operation, transaction_id=transaction_id, observed_at=timezone.now())
         if not identity_matches:
             raise ReconciliationConflict("identity_changed_during_http")
         return result
     except TorobPayError as error:
-        if not _end_step(lease, operation, outcome="rejected" if error.outcome == "rejected" else "unknown", error=error):
+        if not _end_step(lease, operation, outcome="rejected" if error.outcome == "rejected" else "unknown",
+                         error=error, observed_at=timezone.now()):
             raise ReconciliationConflict("identity_changed_during_http") from None
         raise
 
@@ -316,7 +415,7 @@ def _fulfillment_checks(payment, *, confirmation_at=None):
         raise ReconciliationConflict("another_receipt_requires_review")
     effective = confirmation_at or timezone.now()
     if (timezone.is_naive(effective) or effective > timezone.now() or effective < payment.created_at
-            or (order.expires_at and effective > order.expires_at)):
+            or not confirmation_before_reservation_deadline(order, effective)):
         raise ReconciliationConflict("confirmation_after_deadline")
     items = list(order.items.order_by("variant_id", "pk"))
     variants = list(ProductVariant.objects.select_for_update().filter(
@@ -342,8 +441,14 @@ def _finish(lease, *, remote, pending=False):
         if payment.status != PaymentStatus.SUCCESSFUL:
             evidence = data.get("settlement_evidence", {})
             try:
-                confirmed_at = datetime.fromisoformat(evidence["observed_at"])
-                if evidence.get("amount_rial") != _amount(payment) or evidence.get("transaction_id") != _transaction_id(payment):
+                confirmed_at = payment.settle_confirmed_at
+                if (confirmed_at is None or evidence.get("source") != "server_api_response"
+                        or datetime.fromisoformat(evidence["observed_at"]) != confirmed_at
+                        or evidence.get("amount_rial") != _amount(payment)
+                        or evidence.get("transaction_id") != _transaction_id(payment)
+                        or evidence.get("order_id") != payment.order_id or evidence.get("payment_id") != payment.pk
+                        or evidence.get("request_id") != str(payment.request_id)
+                        or evidence.get("token_fingerprint") != payment.authority):
                     raise ValueError
             except (KeyError, TypeError, ValueError) as exc:
                 raise ReconciliationConflict("settlement_evidence_unavailable") from exc
@@ -362,9 +467,15 @@ def _finish(lease, *, remote, pending=False):
                 "payment_time": {"source": "server_confirmation_upper_bound", "upper_bound": confirmed_at.isoformat(),
                                  "gateway_paid_at": None}}
             _record_receipt_decision(payment, {"action": "accept", "reason": "server_confirmed_within_reservation",
-                                             "observed_at": observed.isoformat()})
+                                             "observed_at": observed.isoformat(),
+                                             "settle_confirmed_at": confirmed_at.isoformat(),
+                                             "order_expires_at": evidence.get("reservation_expires_at")})
+        # Matching repeated SETTLE is read-only fulfillment-wise, including
+        # accepted legacy records whose precise first observation is unknown.
+        payment.reservation_hold = False
+        payment.error_message = ""
     elif remote.status == "REVERT":
-        if data.get("receipt_seen") or payment.paid_at or payment.gateway_paid_at or data.get("manual_block") not in (
+        if data.get("receipt_seen") or payment.settle_confirmed_at or payment.paid_at or payment.gateway_paid_at or data.get("manual_block") not in (
             None, "confirmation_after_deadline", "order_cancelled_or_inventory_released", "inventory_reservation_unavailable",
         ):
             raise ReconciliationConflict("gateway_receipt_conflict")
@@ -379,6 +490,7 @@ def _finish(lease, *, remote, pending=False):
             payment.status = PaymentStatus.PENDING
         payment.error_message = "پرداخت هنوز در انتظار تعیین وضعیت ترب‌پی است."
     data["active_operation"].update(status="confirmed", finished_at=timezone.now().isoformat())
+    payment.reconciliation_lease_expires_at = None
     if remote.status in ("SETTLE", "REVERT"):
         payment.creation_status = PaymentCreationStatus.READY
     payment.save()
@@ -400,6 +512,7 @@ def _review(lease, reason, *, critical=True):
     payment.reservation_hold = True
     payment.error_message = REVIEW_MESSAGE
     payment.status = PaymentStatus.MANUAL_REVIEW
+    payment.reconciliation_lease_expires_at = None
     if critical:
         data["manual_block"] = reason
     active = data.get("active_operation", {})
@@ -421,8 +534,12 @@ def _unknown(lease):
         return payment
     payment.reservation_hold = True
     payment.error_message = "نتیجهٔ عملیات ترب‌پی روشن نیست؛ پرداخت یا بازپرداخت تازه انجام ندهید و با پشتیبانی تماس بگیرید."
-    if data.get("receipt_seen"):
+    read_only_known_receipt = (lease.previous_status == PaymentStatus.SUCCESSFUL
+        and not data.get("cancellation_intent") and not data.get("pending_update") and not data.get("uncertain_mutation")
+        and data.get("active_operation", {}).get("last_step", {}).get("operation") == "status")
+    if data.get("receipt_seen") and not read_only_known_receipt:
         payment.status = PaymentStatus.MANUAL_REVIEW
+    payment.reconciliation_lease_expires_at = None
     active = data.get("active_operation", {})
     if active.get("id") == lease.operation_id:
         active.update(status="uncertain", finished_at=timezone.now().isoformat())
@@ -445,6 +562,7 @@ def _rejected_operation(lease, error):
         data["provider_discounted"] = True
     data["active_operation"].update(status="rejected", code=getattr(error, "code", None), finished_at=timezone.now().isoformat())
     payment.status, payment.reservation_hold = lease.previous_status, lease.previous_hold
+    payment.reconciliation_lease_expires_at = None
     payment.error_message = str(error)[:255]
     payment.save()
     return payment
@@ -507,11 +625,14 @@ def _run(lease):
         remote = _status(lease, gateway, update=bool(_data(lease.payment).get("pending_update")))
         return _advance(lease, gateway, remote)
     except ReconciliationConflict as error:
-        return _review(lease, error.reason)
+        return _review(lease, error.reason, critical=error.reason != "operation_lease_expired")
     except (TorobPayError, PaymentGatewayError):
         return _unknown(lease)
     except OrderError:
         return _review(lease, "local_fulfillment_rejected")
+    except PaymentError:
+        _unknown(lease)
+        raise
 
 
 def process_torobpay_callback(payment, callback_data):
@@ -529,9 +650,9 @@ def handle_callback(request_id, callback_data):
     return process_torobpay_callback(payment, callback_data) if payment else None
 
 
-def reconcile_payment(payment):
+def reconcile_payment(payment, *, heartbeat=None):
     _unlocked()
-    current, lease = _claim(_load(payment), "reconcile")
+    current, lease = _claim(_load(payment), "reconcile", heartbeat=heartbeat)
     return _run(lease) if lease else current
 
 
@@ -676,6 +797,7 @@ def _finish_cancellation(lease, remote):
     if payment.order.status != OrderStatus.CANCELLED and OrderStatus.CANCELLED not in ALLOWED_ORDER_TRANSITIONS.get(payment.order.status, set()):
         raise ReconciliationConflict("refund_confirmed_after_fulfillment")
     payment.status, payment.reservation_hold, payment.needs_refund = PaymentStatus.CANCELLED, False, False
+    payment.reconciliation_lease_expires_at = None
     payment.error_message = "لغو پرداخت توسط ترب‌پی تأیید شد؛ زمان واریز بازپرداخت تابع درگاه است."
     data.update(cancellation_confirmed=True, last_known_order_state="CANCELED", api_status="REVERT")
     payment.metadata["remote_cancellation_confirmed"] = True
@@ -833,6 +955,7 @@ def _finish_update(lease, remote):
     data["active_operation"].update(status="confirmed", finished_at=timezone.now().isoformat())
     payment.status = PaymentStatus.SUCCESSFUL
     payment.reservation_hold = False
+    payment.reconciliation_lease_expires_at = None
     payment.error_message = "کاهش مبلغ توسط ترب‌پی تأیید شد؛ زمان بازپرداخت اختلاف تابع درگاه است."
     payment.save()
     return payment
@@ -855,6 +978,8 @@ def inspect_payment(payment):
             "api_status": remote.status, "amount_rial": remote.amount_rial, "identity_matches": valid,
             "local_status": current.status, "reservation_hold": current.reservation_hold,
             "operation_status": _data(current).get("active_operation", {}).get("status", ""),
+            "settle_confirmed_at": current.settle_confirmed_at.isoformat() if current.settle_confirmed_at else None,
+            "reconciliation_lease_expires_at": current.reconciliation_lease_expires_at.isoformat() if current.reconciliation_lease_expires_at else None,
             "refund_execution": "none"}
 
 

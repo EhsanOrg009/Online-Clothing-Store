@@ -21,7 +21,7 @@ from payments.gateways.zibal import _track_id
 from payments.gateways.zibal_time import confirmed_zone
 from payments.models import Payment, PaymentCreationStatus
 from payments.services import (
-    PaymentError, classify_receipt, process_callback, potentially_successful_receipt,
+    PaymentError, classify_receipt, process_callback, potentially_successful_receipt, payment_processing_active,
     receipt_history_fingerprint, receipt_review_reasons, recovery_receipt_snapshot, _authorize_recovery_primary,
 )
 from scripts.db_backup import BackupError, protect_recovery_backup, verify_backup_checksum
@@ -179,7 +179,7 @@ class Command(BaseCommand):
         report["historical_non_zibal_receipts"] = [p.authority for p in payments if p.gateway != "zibal"]
         report["incomplete_inquiries"] = []
         report["primary_selection_blockers"] = []
-        report["unresolved_provider_payments"] = [p.pk for p in payments if p.reservation_hold]
+        report["unresolved_provider_payments"] = [p.pk for p in payments if p.reservation_hold or payment_processing_active(p)]
         if report["unresolved_provider_payments"]:
             issue = "Unresolved remote payment operations prevent primary selection; reconcile their provider before recovery."
             report["blocking_issues"].append(issue)

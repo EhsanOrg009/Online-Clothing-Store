@@ -18,6 +18,7 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -307,7 +308,7 @@ def potentially_successful_receipt(payment):
         evidence.extend(entry.get("data") for entry in history if isinstance(entry, dict))
     return bool(
         payment.status in (PaymentStatus.SUCCESSFUL, PaymentStatus.MANUAL_REVIEW)
-        or payment.paid_at or payment.gateway_paid_at
+        or payment.paid_at or payment.gateway_paid_at or payment.settle_confirmed_at
         or any(isinstance(record, dict) and (
             record.get("status") == 1 or record.get("successful") is True or record.get("receipt_seen") is True
         ) for record in evidence)
@@ -315,11 +316,17 @@ def potentially_successful_receipt(payment):
 
 
 def receipt_history_fingerprint(payments):
-    fields = ("pk", "order_id", "gateway", "authority", "request_id", "creation_status", "reservation_hold", "amount", "status", "needs_refund",
+    fields = ("pk", "order_id", "gateway", "authority", "request_id", "creation_status", "reservation_hold",
+              "settle_confirmed_at", "reconciliation_lease_expires_at", "amount", "status", "needs_refund",
               "transaction_id", "reference_id", "paid_at", "gateway_paid_at", "metadata")
     records = [{key: getattr(payment, key) for key in fields}
                for payment in sorted(payments, key=lambda item: item.pk)]
     return hashlib.sha256(json.dumps(records, default=str, sort_keys=True).encode()).hexdigest()
+
+
+def payment_processing_active(payment):
+    deadline = payment.reconciliation_lease_expires_at
+    return bool(deadline and timezone.is_aware(deadline) and deadline > timezone.now())
 
 
 _RECOVERY_SEAL = object()
@@ -363,7 +370,7 @@ def _authorize_recovery_primary(*, order, payments, verified, selected_track_ids
     potential = {p.authority for p in payments if potentially_successful_receipt(p)} | set(verified)
     if (
         not primary or primary.pk not in {p.pk for p in payments}
-        or any(p.reservation_hold or p.creation_status in (PaymentCreationStatus.REQUESTING, PaymentCreationStatus.UNCERTAIN,
+        or any(p.reservation_hold or payment_processing_active(p) or p.creation_status in (PaymentCreationStatus.REQUESTING, PaymentCreationStatus.UNCERTAIN,
                                      PaymentCreationStatus.REVIEW) or (
             not p.authority and p.creation_status != PaymentCreationStatus.REJECTED
         ) for p in payments)
@@ -521,6 +528,7 @@ def _apply_verified_callback(snapshot, callback_data, result, *, allow_fulfillme
     other_manual_receipt = any(
         p.status == PaymentStatus.MANUAL_REVIEW
         or p.reservation_hold
+        or payment_processing_active(p)
         or (p.status != PaymentStatus.SUCCESSFUL and potentially_successful_receipt(p))
         for p in other_receipts
     )
@@ -666,16 +674,30 @@ def expire_stale_payments(older_than_minutes: int = 60) -> int:
     ).update(status=PaymentStatus.EXPIRED, error_message="منقضی شده")
 
 
-def reconcile_before_inventory_release(order):
+def inventory_release_blocked(order):
+    """Called while holding Order; an active processing lease is independent."""
+    return order.payments.filter(Q(reservation_hold=True) | Q(reconciliation_lease_expires_at__gt=timezone.now())).exists()
+
+
+def reconcile_before_inventory_release(order, *, heartbeat=None):
     """Optional provider capability. No row locks or surrounding transaction."""
-    for payment in order.payments.filter(reservation_hold=True).order_by("pk"):
+    successful = True
+    for payment in order.payments.filter(Q(reservation_hold=True) | Q(status=PaymentStatus.PENDING)
+                                          | Q(reconciliation_lease_expires_at__gt=timezone.now())).order_by("pk"):
+        if payment.reconciliation_lease_expires_at and payment.reconciliation_lease_expires_at > timezone.now():
+            # Do not wait/repeat HTTP when another worker owns the observation.
+            continue
         try:
             gateway = get_gateway(payment.gateway)
             reconcile = getattr(gateway, "reconcile_before_release", None)
             if callable(reconcile):
-                reconcile(payment)
+                current = reconcile(payment, heartbeat=heartbeat) if heartbeat else reconcile(payment)
+                if current.metadata.get("torobpay", {}).get("active_operation", {}).get("status") == "uncertain":
+                    successful = False
         except (PaymentGatewayError, PaymentError):
+            successful = False
             logger.warning("Inventory release awaits reconciliation order_id=%s payment_id=%s", order.pk, payment.pk)
+    return successful
 
 
 def cancel_order_with_payment(order, *, actor, evidence=None):

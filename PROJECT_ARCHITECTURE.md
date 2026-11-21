@@ -744,6 +744,8 @@ queryset = queryset.filter(category_id__in=[category_obj.id, *descendant_ids])
 
 `payments/services.py` فایل واقعی orchestration عمومی است؛ `payments/torobpay_services.py` مراحل چندگانه و lease پایدار ترب‌پی را اجرا می‌کند. HTTP بیرون تراکنش است؛ نوشتن نتیجه با ترتیب قفل `Order → Payment → ProductVariant` انجام می‌شود. `provider_token` محرمانه و `reservation_hold` مخصوص جلوگیری از آزادسازی زودهنگام اضافه شده‌اند؛ authority ترب‌پی fingerprint توکن است و authority زیبال تغییر نمی‌کند. `OrderItem.category_name` snapshot زمان ثبت سفارش است و از کاتالوگ امروز برای سوابق قدیمی backfill نمی‌شود. گزینهٔ Mock در checkout فعلی وجود ندارد و رفتار رد آن حفظ شده است.
 
+`settle_confirmed_at` نخستین مشاهدهٔ معتبر سروری است و پیش از انتظار برای قفل ثبت زمانی می‌شود؛ با مهلت واقعی `Order.expires_at` و شرط سخت `<` سنجیده می‌شود. زمان واقعی پرداخت ترب‌پی از آن ساخته نمی‌شود. `reconciliation_lease_expires_at` مالکیت محدود هر تلاش و `reconciliation_attempted_at` ترتیب منصفانهٔ صف را نگه می‌دارند. انقضا، lease و hold را مستقلاً زیر قفل دوباره بررسی می‌کند. `payments/maintenance.py` lease مشترک `PaymentMaintenanceJob` و وضعیت آخرین اجرا را کنترل می‌کند؛ `run_payment_maintenance` فرمان‌های واقعی بازیابی و انقضا را اجرا می‌کند. timer سیستم‌دی مخزن هر دقیقه در همان web موجود فعال می‌شود؛ انقضا در مرزهای پنج‌دقیقه‌ای UTC است. این فایل‌های timer به معنی نصب آن‌ها روی تولید نیستند؛ مراحل فعال‌سازی در راهنمای ترب‌پی آمده‌اند.
+
 ### افزودن سرویس پیامک واقعی
 
 به بخش [احراز هویت با OTP](#احراز-هویت-با-otp) مراجعه کنید.

@@ -73,7 +73,11 @@ discountAmount = Order.discount_total × 10
 
 ۴. status سروری با مبلغ ریال و transaction ID ذخیره‌شده تطبیق می‌شود. callback `OK/FAILED` اثبات پرداخت نیست. برای مسیر معمول، `verify → status(VERIFY) → بررسی وضعیت سفارش/رزرو → settle → status(SETTLE)` اجرا می‌شود. verify تنها receipt میانی است. `mark_order_paid` فقط پس از تأیید نهایی و دقیقاً یک بار فراخوانی می‌شود.
 
-۵. PDF زمان واقعی پرداخت را نمی‌دهد. با سیاست انتخابی مالک، مشاهدهٔ سروری SETTLE داخل مهلت رزرو، کران بالای معتبر زمان پرداخت است؛ `gateway_paid_at=NULL` باقی می‌ماند و زمان callback/ساخت سفارش جای آن گذاشته نمی‌شود. کران و شواهد مقدار/شناسه به‌صورت پایدار ثبت می‌شوند. تأیید دیرهنگام، هویت/مبلغ متعارض، موجودی از دست‌رفته یا receipt دستی دیگر، fulfillment خودکار نمی‌دهد. سفارش لغوشده/رزرو آزادشده احیا نمی‌شود.
+۵. PDF زمان واقعی پرداخت را نمی‌دهد. `Payment.settle_confirmed_at` نخستین زمان دریافت و تطبیق پاسخ معتبر سروری `SETTLE` است؛ این ستون **زمان واقعی پرداخت مشتری نیست**. زمان، بلافاصله پس از اعتبارسنجی پاسخ و پیش از انتظار برای قفل DB گرفته می‌شود. زیر قفل، ارتباط توکن/پرداخت/سفارش دوباره بررسی و زمان به همراه مبلغ ریال و شناسهٔ تراکنش فقط یک بار ثبت می‌شود. callback، ایجاد Payment و زمان نوشتن DB جای آن گذاشته نمی‌شوند؛ `gateway_paid_at=NULL` می‌ماند.
+
+قاعدهٔ ترب‌پی دقیقاً `settle_confirmed_at < Order.expires_at` است. برابری با مهلت نیز دیرهنگام محسوب می‌شود؛ رفتار زمانی مستقل زیبال تغییر نکرده است. مهلت از ردیف واقعی سفارش خوانده و پیش از پاک‌شدن آن توسط سرویس پرداخت، در شواهد ثبت می‌شود. پاسخِ درون مهلت با نوشتن کمی دیرتر، در صورت سالم‌بودن رزرو و سایر شروط پذیرفته می‌شود. تأیید دیرهنگام، مبلغ/شناسهٔ متعارض، رزرو آزادشده و سفارش لغوشده به بررسی دستی می‌روند؛ سفارش یا موجودی احیا نمی‌شود. ادمین زمان مشاهده، مبلغ/شناسهٔ تأییدشده و دلیل بررسی را جداگانه نشان می‌دهد؛ این ستون نباید در صورتحساب یا گزارش مالی «زمان پرداخت مشتری» نامیده شود.
+
+نسخهٔ قدیمی زمان اعمال DB را در `settlement_evidence.observed_at` نگه می‌داشت. زمان دقیق دریافت پاسخ تاریخی قابل بازسازی نیست؛ migration مقدار حدسی نمی‌سازد و ستون جدید برای آن سوابق NULL می‌ماند. رسید قدیمیِ قبلاً پذیرفته‌شده دوباره آماده‌سازی یا رد نمی‌شود. رسید ناقصِ منتظر پذیرش، بدون زمان مشاهدهٔ قابل اتکا، در بررسی دستی باقی می‌ماند.
 
 | API status | معنای قابل اتکا و رفتار |
 | --- | --- |
@@ -88,7 +92,9 @@ PDF هم انتقال خودکار به ONGOING بعد از ۱۰ دقیقه و �
 
 ## بازیابی و عملیات دوره‌ای
 
-هر عملیات remote یک lease و timestamp پایدار دارد؛ زمان پیش‌فرض lease با timeout ده‌ثانیه‌ای ۱۸۰ ثانیه است. duplicate callback فقط شمارنده را زیاد می‌کند. HTTP هیچ قفل DB را نگه نمی‌دارد؛ نتایج با ترتیب Order، Payment، واریانت‌ها به PK صعودی اعمال می‌شوند. پاسخ worker قدیمی شواهدش را ثبت می‌کند و تصمیم worker جدید را بازنویسی نمی‌کند.
+هر عملیات درگاه پیش از HTTP، با ترتیب قفل `Order → Payment` مالک پردازش و `reconciliation_lease_expires_at` را ثبت می‌کند. مهلت با timeout پیش‌فرض، ۱۸۰ ثانیه است و پیش/پس از هر مرحله تمدید می‌شود. مالک جدید فقط پس از پایان lease می‌تواند پردازش را با **status تازه** بازیابی کند؛ درخواست مالی نامعلوم تکرار نمی‌شود. lease قدیمیِ JSON با زمان معتبر به ستون محدود منتقل می‌شود؛ زمان خراب دیگر موجب انتظار بی‌پایان نمی‌شود. پاسخ worker قبلی در audit باقی می‌ماند و نتیجهٔ مالک جدید را بازنویسی نمی‌کند.
+
+انقضا زیر قفل سفارش هم lease فعال و هم `reservation_hold` را بررسی می‌کند؛ حتی false بودن اشتباهِ فلگ، اجازهٔ آزادسازی هنگام lease فعال نمی‌دهد. HTTP بیرون تراکنش است. پایان lease فقط مالکیت worker را آزاد می‌کند؛ نامعلوم‌بودن وجه همچنان hold مالی یا بررسی دستی دارد. scheduler بعدی lease کرش‌شده را بازیابی می‌کند و فقط وضعیت قطعیِ پرداخت‌نشده، با قواعد موجود سفارش، اجازهٔ آزادسازی یک‌بارهٔ stock می‌دهد. انقضا در غیاب scheduler نیز این کنترل‌ها و استعلام لازم را دارد.
 
 بازیابی زیبال نیز پرداخت دارای `reservation_hold` را مانع انتخاب رسید اصلی می‌داند؛ حتی اگر token ثبت شده ولی هیچ رسید میانی هنوز دیده نشده باشد. تا تعیین وضعیت ترب‌پی، ابزار بازیابی زیبال مجوز پذیرش رسید دیگری برای همان سفارش نمی‌دهد. این hold به fingerprint برنامهٔ بازیابی نیز متصل است تا تغییر هم‌زمانش مجوز قبلی را بی‌اعتبار کند.
 
@@ -104,12 +110,89 @@ uv run python manage.py reconcile_torobpay_payments --payment-id <PAYMENT_ID> --
 uv run python manage.py reconcile_torobpay_payments --apply --limit 100
 ```
 
-در runner عملیاتی موجود، هر یک دقیقه این command را اجرا و `expire_pending_orders` موجود را هر پنج دقیقه حفظ کنید. در تولید از همان wrapper و web استفاده می‌شود؛ این راهنما هیچ Cron/systemd یا سرویس جدید نصب نکرده است:
+پردازش دسته‌ای از پرداخت‌های بررسی‌نشده/کمتر بررسی‌شده شروع می‌شود؛ `reconciliation_attempted_at` مانع گرسنگی رسیدهای قدیمی در حضور checkout تازه یا صف بررسی دستی می‌شود. می‌توان بودجهٔ نرم را نیز محدود کرد:
 
 ```sh
-scripts/compose-production exec -T web python manage.py reconcile_torobpay_payments --apply --limit 100
-scripts/compose-production exec -T web python manage.py expire_pending_orders
+scripts/compose-production exec -T web python manage.py reconcile_torobpay_payments --apply --limit 100 --max-runtime-seconds 45
+scripts/compose-production exec -T web python manage.py expire_pending_orders --limit 100 --max-runtime-seconds 45
 ```
+
+### زمان‌بندی اصلی تولید: timer سیستم‌دی
+
+راهکار اصلی، `scripts/systemd/minikandoo-payments.timer` و service همراه آن است. timer در هر دقیقه فعال می‌شود؛ service از `scripts/run-payment-maintenance` و wrapper تولید موجود استفاده می‌کند و سرویس Docker تازه‌ای نمی‌سازد. کانتینر بکاپ، نقش و دسترسی متفاوتی دارد و برای اجرای قواعد پرداخت استفاده نمی‌شود. سه worker وب نیز scheduler پس‌زمینهٔ جداگانه اجرا نمی‌کنند.
+
+اسکریپت در دایرکتوری واقعی پروژه، با تنظیمات صریح `config.settings.production` در `web` موجود، فرمان زیر را اجرا می‌کند:
+
+```sh
+python manage.py run_payment_maintenance --apply --limit 100 --max-runtime-seconds 45
+```
+
+این فرمان ابتدا `reconcile_torobpay_payments --apply` و سپس، در مرزهای پنج‌دقیقه‌ای UTC، `expire_pending_orders` را اجرا می‌کند. اولین tick و جبران وقفه نیز انقضا را بررسی می‌کنند. شکست استعلام مانع بررسی امن سایر سفارش‌ها نمی‌شود، ولی اجرای ناقص exit غیرصفر دارد. وجود بررسی دستی در نتیجه، به معنی failure زیرساخت نیست؛ شمارش آن و شناسه‌های مربوط در گزارش و warning هستند.
+
+اجرای هم‌زمان service روی یک میزبان توسط نوع `oneshot` محدود می‌شود. ردیف مشترک `PaymentMaintenanceJob` در DB از هم‌پوشانی بین میزبان‌ها/کانتینرها نیز جلوگیری می‌کند؛ مالکیت آن پیش از هر مرحلهٔ HTTP بررسی و تمدید می‌شود. lease هر Payment محافظ مستقل است. UUID مالک قدیمی نمی‌تواند نتیجهٔ مالک جدید را بازنویسی کند. Redis، رمز درگاه یا قفل فایل میزبان تنها محافظ این کار نیستند.
+
+بودجهٔ ۴۵ ثانیه‌ای، شروع تلاش تازه را محدود می‌کند و برای انقضای موعددار بخشی از بودجه کنار گذاشته می‌شود. تلاش جاری می‌تواند برای تکمیل امن مرحله بیشتر طول بکشد؛ `timeout` **داخل کانتینر** سقف سخت ۳۰۰ ثانیه و مهلت کشتن ۱۰ ثانیه دارد. سقف service میزبان ۳۳۰ ثانیه است. در timeout سخت، leaseهای پایدار به worker بعدی امکان استعلام و بازیابی می‌دهند. tickی که اجرای قبلی هنوز فعال باشد، اجرای موازی تازه نمی‌سازد.
+
+### نصب روی سرور واقعی؛ فقط توسط مسئول استقرار
+
+در این وظیفه هیچ timer روی سرور واقعی نصب یا فعال نشده است. پیش از نصب، Docker Engine و `docker.service`، Compose plugin، مسیر پایدار پروژه، ساعت همگام‌شدهٔ سرور، محیط خصوصی تولید و migration `payments/0006` را بررسی کنید. `timeout` در تصویر اجرایی Debian موجود است؛ با فرمان خواندنی `scripts/compose-production exec -T web timeout --version` آن را در تصویر مستقر کنترل کنید. فقط یک زمان‌بند برای این دو فرمان فعال باشد؛ Cron/timer قبلیِ همین کار را پس از شناسایی و بازبینی غیرفعال کنید، بدون تغییر jobهای بکاپ یا کارهای نامرتبط.
+
+پس از اعمال نسخه و schema بررسی‌شده، از ریشهٔ واقعی پروژه:
+
+```sh
+sudo install -d -m 0750 /etc/minikandoo
+sudo install -m 0644 scripts/systemd/minikandoo-payments.service /etc/systemd/system/minikandoo-payments.service
+sudo install -m 0644 scripts/systemd/minikandoo-payments.timer /etc/systemd/system/minikandoo-payments.timer
+sudo install -m 0644 scripts/systemd/payment-maintenance.conf.example /etc/minikandoo/payment-maintenance.conf
+sudoedit /etc/minikandoo/payment-maintenance.conf
+```
+
+فقط مسیر واقعی را جایگزین کنید؛ فایل تنظیم timer هیچ secretی نمی‌خواهد:
+
+```text
+MINIKANDOO_PROJECT_DIR=/absolute/path/to/minikandoo
+```
+
+اگر wrapper از فایل محیط دیگری استفاده می‌کند، فقط مسیر خصوصی موجود را با `ENV_FILE` در همین فایل مشخص کنید. credentials از محیط همان کانتینر `web` خوانده می‌شوند؛ مقدارشان در آرگومان فرمان قرار نمی‌گیرد. فایل محیط واقعی را با فایل مثال جایگزین نکنید.
+
+```sh
+systemctl is-active docker.service
+sudo systemd-analyze verify /etc/systemd/system/minikandoo-payments.service /etc/systemd/system/minikandoo-payments.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now minikandoo-payments.timer
+sudo systemctl start minikandoo-payments.service
+```
+
+### مشاهده، شکست و راه‌اندازی مجدد
+
+```sh
+systemctl status minikandoo-payments.timer minikandoo-payments.service
+systemctl list-timers --all minikandoo-payments.timer
+journalctl -u minikandoo-payments.service --since '1 hour ago' --no-pager
+scripts/compose-production exec -T web python manage.py run_payment_maintenance --status
+```
+
+`last_success_at`، `last_finished_at`، `last_error` و `last_expiration_at` در ردیف وظیفه و ادمین فقط‌خواندنی قابل مشاهده‌اند. موفقیت tick به معنی موفق‌بودن همهٔ پرداخت‌ها نیست؛ صف باقی‌مانده و شمارش بررسی دستی را در `summary` ببینید. کاربر پشتیبانی برای نمایش این ردیف به مجوز `payments.view_paymentmaintenancejob` نیاز دارد. استعلام status پیش‌فرض، هیچ ردیف یا پرداختی نمی‌سازد.
+
+service از نوع `oneshot` است و inactive بودن آن بین tickها طبیعی است؛ timer باید active، موعد بعدی مشخص و نتیجهٔ اجرای قبلی موفق باشد. ذخیرهٔ فرم ادمین برای Payment و وضعیت وظیفه مجاز نیست تا نمونهٔ کهنه، شواهد یا lease تازه را بازنویسی نکند. عملیات مالی همچنان فقط از سرویس‌ها و فرمان‌های مجاز انجام می‌شود.
+
+در قطعی API، Payment نامعلوم FAILED نمی‌شود، error پالایش‌شده و شناسه‌های محلی ثبت می‌شوند و command خروج غیرصفر دارد. timer در tick بعدی دوباره تلاش می‌کند؛ بعد از restart نیز `Persistent=true` یک اجرای جبرانی می‌دهد. در کرش، پس از پایان lease، مالک بعدی status را پیش از هر تصمیم می‌خواند. ابتدا مشکل واقعی را رفع و لاگ را بررسی کنید، سپس:
+
+```sh
+sudo systemctl reset-failed minikandoo-payments.service
+sudo systemctl restart minikandoo-payments.timer
+sudo systemctl start minikandoo-payments.service
+```
+
+برای به‌روزرسانی، timer را متوقف کنید و پایان اجرای service جاری را بررسی کنید؛ سپس طبق راهنمای استقرار، بکاپ و توقف writerها انجام شود. plan و migration فقط در پنجرهٔ مجاز و با تصویر بازبینی‌شده، یک بار اجرا شوند:
+
+```sh
+sudo systemctl stop minikandoo-payments.timer
+scripts/compose-production run --rm --no-deps -T --entrypoint python web manage.py migrate --plan
+scripts/compose-production run --rm --no-deps -T --entrypoint python web manage.py migrate --noinput
+```
+
+این فرمان‌های تولید دستورالعمل مسئول سرورند و در این پیاده‌سازی اجرا نشده‌اند. پس از rollout، سلامت وب، نتیجهٔ نخستین tick، موعد اجرای بعدی و آخرین موفقیت انقضا را واقعاً کنترل کنید؛ گذشتن تست‌ها به‌تنهایی تأیید آماده‌بودن سرور نیست.
 
 اگر token create گم شده، status با transaction UUID مستند نیست. token را مستقل از پنل/پشتیبانی ترب‌پی پیدا کنید، در فایل خارج از Git با دسترسی ۶۰۰ و mount خواندنی بگذارید و با بکاپ تازهٔ SQL و SHA256 معتبر به همان Payment متصل کنید:
 
@@ -157,6 +240,8 @@ uv run python manage.py reconcile_torobpay_payments --payment-id <PAYMENT_ID> --
 
 `orders/0003` فقط category snapshot و `payments/0005` فقط token محرمانه و hold را اضافه می‌کنند. مبلغ، authority، UUID، references، metadata و timestamps قدیمی rewrite نمی‌شوند. rollback payment/0005 با شواهد ترب‌پی رد می‌شود تا اطلاعات مالی حذف نشود؛ بازگشت نسخه پس از استفاده نیازمند طرح بکاپ/بازیابی بازبینی‌شده است. fixture تست migration قدیمی schema نهایی را کامل restore می‌کند.
 
+`payments/0006_settlement_confirmation_and_maintenance` سه ستون nullable زمان مشاهده/lease/آخرین تلاش، index صف و ردیف وضعیت وظیفه را اضافه می‌کند. هیچ زمان تاریخی از callback، ایجاد پرداخت یا timestamp قدیمی DB حدس زده نمی‌شود و رکوردهای مالی زیبال تغییر نمی‌کنند. برگشت schema پس از وجود شواهد ترب‌پی یا وظیفه مسدود است؛ rollback باید با بکاپ و طرح بازبینی‌شده انجام شود.
+
 token در DB با دسترسی محدود ذخیره می‌شود؛ رمزنگاری جدیدِ فیلد اضافه نشده است. حفاظت storage و بکاپ‌های خصوصی طبق سیاست استقرار مالک باقی می‌ماند. JWT فقط cache خصوصی است. لاگ اپلیکیشن شامل operation، شناسه‌های محلی، correlation و کدهای پالایش‌شده است؛ پیام خام API، credentials، body callback و URL محرمانه چاپ نمی‌شوند. ادمین token و URL را نمایش نمی‌دهد و صفحات مشتری فقط URL رسمی لازم در صفحهٔ انتقال را دارند.
 
 پیش از rollout: چهار credential پذیرندهٔ فعال را امن تنظیم، domain/callback POST را تأیید، فرض‌های سبد/زمان/میزبان را با ترب‌پی بررسی، بکاپ تازه و restore آزمایشی تهیه، migration plan را مرور و در پنجرهٔ مجاز یک بار اعمال کنید. سپس readiness، هر دو روش، runner یک‌دقیقه‌ای، هشدارهای review و تعهد settle روزانه را بررسی کنید. در این وظیفه production deploy، production migration، تغییر `.env.production` یا خرید/refund زنده انجام نشده است.
@@ -174,16 +259,18 @@ npm run build
 
 SQLite قفل واقعی را ثابت نمی‌کند؛ suite و tests concurrency باید روی MariaDB جداگانه نیز اجرا شوند. محیط QA موقت با `--no-defaults`، datadir تازه، `--skip-networking` و Unix socket خصوصی در `/tmp` ساخته می‌شود؛ timezone سیستم فقط به همین DB وارد می‌شود. تعداد/نتیجهٔ اجرای واقعی در گزارش تحویل ثبت می‌شود؛ هیچ آزمون اجرا نشده‌ای یا عملیات زنده، موفق فرض نمی‌شود.
 
-نتیجهٔ بررسی تحویل در ۲۱ نوامبر ۲۰۲۶، پس از آخرین اصلاح حفاظت بازیابی:
+نتیجهٔ بررسی سخت‌سازی در ۲۱ نوامبر ۲۰۲۶، بر پایهٔ آخرین `origin/main` یعنی `0176334`:
 
 | بررسی | نتیجهٔ واقعی |
 | --- | --- |
-| مجموعهٔ کامل با `shop_test_settings` و SQLite | ۶۷۹ آزمون، موفق؛ ۲۷ آزمون قفل به‌علت محدودیت SQLite اجرا نشد |
-| همان مجموعه روی MariaDB 11.4.13 ایزوله | ۶۷۹ آزمون، موفق؛ بدون آزمون کنارگذاشته‌شده |
+| خط مبنای نسخهٔ دریافت‌شده، SQLite | ۶۷۹ آزمون، موفق؛ ۲۷ مورد محدودیت قفل |
+| مجموعهٔ کامل نهایی با `shop_test_settings` و SQLite | ۷۱۸ مورد؛ ۶۸۸ موفق و ۳۰ مورد محدودیت قفل |
+| همان مجموعهٔ نهایی روی MariaDB 11.4.13 ایزوله | هر ۷۱۸ آزمون موفق؛ بدون مورد کنارگذاشته‌شده |
+| آزمون متمرکز نهایی مشاهده، زمان‌بندی، هم‌زمانی و migration روی MariaDB | هر ۴۴ آزمون موفق |
 | `manage.py check` با تنظیمات QA | بدون ایراد |
 | `makemigrations --check --dry-run` با تنظیمات QA | بدون تغییر اعلام‌نشدهٔ مدل |
 | `npm run build` | موفق؛ CSS و فایل‌های vendor ساخته شدند |
 | `git diff --check` | موفق |
-| اعتبارسنجی فقط‌خواندنی Compose با فایل مثال و مقادیر کاملاً ساختگی | موفق؛ هیچ کانتینری ساخته یا اجرا نشد |
+| اعتبارسنجی آفلاین service/timer | موفق؛ فایل‌های همسان با مخزن با مجوز ۶۴۴ و وابستگی ساختگی Docker بررسی شدند؛ واحد واقعی نصب/اجرا نشد |
 
-برای این بررسی از `.venv/bin/python` استفاده شد؛ فرمان MariaDB، `manage.py test --settings=settings_torobpay_mariadb --noinput --verbosity 2` با ماژول QA موقت و سوکت خصوصی بود. این تنظیمات/داده‌های موقت جایگزین تنظیمات محیط تولید نیستند. هیچ وابستگی تازه‌ای اضافه نشد و هیچ خرید یا بازپرداخت زنده آزمایش نشد.
+برای این بررسی از `.venv/bin/python` استفاده شد؛ فرمان نهایی MariaDB، `manage.py test --settings=settings_settlement_mariadb --noinput --verbosity 2` با ماژول QA و سوکت خصوصی بود. تنظیمات/داده‌های QA جایگزین محیط تولید نیستند. آزمون‌های بازتولیدِ تأخیر ثبت/مرز مهلت و تعارض شناسه ابتدا مشکل را نشان دادند؛ ناسازگاری snapshot در اجرای کامل نیز رفع شد. نتیجهٔ نهایی بدون شکست است. هیچ وابستگی تازه‌ای اضافه نشد و هیچ خرید یا بازپرداخت زنده آزمایش نشد.

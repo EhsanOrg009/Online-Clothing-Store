@@ -4,6 +4,8 @@
 
 سرویس مستقل `db-backup` نیز در همین Compose project است. [عملیات بکاپ دیتابیس](production-database-backups.md) و [بازیابی پرداخت زیبال](zibal-verification-recovery.md) شامل dry-run، migrationهای جدید و مراحل استقرار بررسی‌شده‌اند. این سند دستور استقرار است؛ در کار اصلاح پرداخت/بکاپ هیچ restart یا deployment تولید اجرا نشده است.
 
+نگهداری پرداخت با timer واحد `minikandoo-payments.timer` و فرمان `run_payment_maintenance --apply` در `web` موجود انجام می‌شود. پس از schema جدید `payments/0006`، فایل‌های `scripts/systemd/` باید توسط مسئول سرور طبق [راهنمای ترب‌پی](torobpay-payment.md) نصب شوند؛ بازیابی هر دقیقه و انقضا در مرزهای پنج‌دقیقه‌ای UTC اجرا می‌شوند. هنگام maintenance window، ابتدا timer را متوقف و پایان اجرای جاری را کنترل کنید؛ پس از rollout و سلامت وب، timer و نتیجهٔ نخستین اجرای آن را بررسی کنید. این زمان‌بندی در مخزن آماده شده و روی سرور واقعی در این وظیفه نصب نشده است.
+
 ## 1. سرور و DNS
 
 - VPS تازه/پشتیبانی‌شده با Ubuntu 26.04، دسترسی SSH با کاربر sudo، فضای دیسک کافی برای دیتابیس، تصاویر و بکاپ‌ها.

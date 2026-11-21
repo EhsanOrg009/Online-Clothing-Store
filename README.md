@@ -642,6 +642,8 @@ scripts/compose-production exec -T web python manage.py expire_pending_orders
 
 Preserve the existing operational schedule for this command. The new backup scheduler runs entirely in Docker and requires no host Cron or systemd timer. Same-host backups protect against database failures but not complete VPS/disk loss; off-site transfer is a separate authorized enhancement.
 
+برای بازیابی پرداخت، timer اصلی `scripts/systemd/minikandoo-payments.timer` هر دقیقه فرمان کنترل‌شدهٔ `run_payment_maintenance --apply` را در `web` موجود اجرا می‌کند؛ انقضا در مرزهای پنج‌دقیقه‌ای انجام می‌شود. lease مشترک DB، ثبت `settle_confirmed_at` و کنترل مستقل انقضا از رقابت و اجرای تکراری جلوگیری می‌کنند. نصب، لاگ‌ها و بازیابی در [راهنمای فارسی ترب‌پی](docs/torobpay-payment.md) آمده است؛ timer فقط در مخزن آماده شده و باید مسئول سرور آن را نصب و نتیجهٔ واقعی را بررسی کند. زمان‌بندی مستقل بکاپ تغییر نکرده است.
+
 ---
 ## 🛠️ Troubleshooting
 

@@ -1,0 +1,5 @@
+# فقط مسیرها؛ هیچ رمز پذیرنده یا پایگاه داده در این فایل قرار ندهید.
+# مالک سرور باید مسیر واقعی checkout تولید را جایگزین کند.
+MINIKANDOO_PROJECT_DIR=/absolute/path/to/minikandoo
+# برای ENV_FILE غیرمعمول، فقط مسیر فایل خصوصی موجود را مشخص کنید:
+# ENV_FILE=/absolute/private/path/.env.production

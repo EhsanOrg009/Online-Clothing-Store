@@ -1,0 +1,17 @@
+[Unit]
+Description=بازیابی پرداخت و نگهداری رزروهای مینی‌کندو
+Requires=docker.service
+Wants=network-online.target
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/minikandoo/payment-maintenance.conf
+ExecStart=/bin/sh -c 'exec /bin/sh "$${MINIKANDOO_PROJECT_DIR}/scripts/run-payment-maintenance"'
+TimeoutStartSec=330s
+KillMode=control-group
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=minikandoo-payments

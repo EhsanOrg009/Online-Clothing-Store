@@ -137,9 +137,9 @@ class TorobPayGateway(PaymentGateway):
         from payments.torobpay_services import process_torobpay_callback
         return process_torobpay_callback(payment, callback_data)
 
-    def reconcile_before_release(self, payment):
+    def reconcile_before_release(self, payment, *, heartbeat=None):
         from payments.torobpay_services import reconcile_payment
-        return reconcile_payment(payment)
+        return reconcile_payment(payment, heartbeat=heartbeat)
 
     def cancel_order_payment(self, payment, *, actor, evidence=None):
         from payments.torobpay_services import cancel_payment

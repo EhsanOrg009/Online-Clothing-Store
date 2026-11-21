@@ -99,12 +99,25 @@ class Payment(models.Model):
             "زمان نامعتبر/مبهم در metadata برای بررسی دستی حفظ می‌شود."
         ),
     )
+    settle_confirmed_at = models.DateTimeField(
+        _("نخستین مشاهدهٔ SETTLE در سرور"), null=True, blank=True, editable=False,
+        help_text=_("زمان دریافت و تطبیق پاسخ سروری؛ زمان واقعی پرداخت مشتری نیست و فقط یک بار ثبت می‌شود."),
+    )
+    reconciliation_lease_expires_at = models.DateTimeField(
+        _("پایان مهلت پردازش درگاه"), null=True, blank=True, editable=False, db_index=True,
+        help_text=_("مالک پردازش در metadata ثبت است؛ پس از این مهلت، استعلام تازه می‌تواند پردازش را بازیابی کند."),
+    )
+    reconciliation_attempted_at = models.DateTimeField(
+        _("آخرین شروع بررسی درگاه"), null=True, blank=True, editable=False,
+    )
 
     class Meta:
         verbose_name = "تراکنش پرداخت"
         verbose_name_plural = "تراکنش‌های پرداخت"
         ordering = ("-created_at",)
-        indexes = [models.Index(fields=["order", "status"])]
+        indexes = [models.Index(fields=["order", "status"]), models.Index(
+            fields=["gateway", "reconciliation_attempted_at", "created_at"], name="payment_reconcile_due",
+        )]
 
     def __str__(self) -> str:
         return f"{self.order.order_number} - {self.amount} تومان ({self.status})"
@@ -124,3 +137,24 @@ class Payment(models.Model):
     @property
     def requires_manual_review(self) -> bool:
         return self.status == PaymentStatus.MANUAL_REVIEW
+
+
+class PaymentMaintenanceJob(models.Model):
+    """One shared scheduler lease/run record; no payment or customer secrets."""
+
+    name = models.CharField(_("نام وظیفه"), primary_key=True, max_length=64, editable=False)
+    lease_id = models.UUIDField(null=True, editable=False)
+    lease_expires_at = models.DateTimeField(_("پایان مهلت اجرای وظیفه"), null=True, editable=False)
+    last_started_at = models.DateTimeField(_("آخرین شروع"), null=True, editable=False)
+    last_finished_at = models.DateTimeField(_("آخرین پایان"), null=True, editable=False)
+    last_success_at = models.DateTimeField(_("آخرین اجرای موفق"), null=True, editable=False)
+    last_expiration_at = models.DateTimeField(_("آخرین اجرای موفق انقضا"), null=True, editable=False)
+    last_error = models.CharField(_("آخرین خطای پالایش‌شده"), max_length=255, blank=True, editable=False)
+    summary = models.JSONField(_("نتیجهٔ آخرین اجرا"), default=dict, editable=False)
+
+    class Meta:
+        verbose_name = "وضعیت وظیفهٔ نگهداری پرداخت"
+        verbose_name_plural = "وضعیت وظایف نگهداری پرداخت"
+
+    def __str__(self):
+        return self.name
