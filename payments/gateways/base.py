@@ -35,7 +35,10 @@ class PaymentRequest:
     """نتیجه ایجاد تراکنش: توکن و آدرس صفحه پرداخت درگاه."""
 
     authority: str
-    redirect_url: str
+    redirect_url: str = field(repr=False)
+    provider_token: str = field(default="", repr=False)
+    audit: dict[str, Any] = field(default_factory=dict)
+    review_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,10 @@ class PaymentGateway(ABC):
     """پایه همه درگاه‌های پرداخت."""
 
     name: str = "base"
+    checkout_title: str = "پرداخت اینترنتی"
+    redirect_referrer_policy: str = "strict-origin-when-cross-origin"
+    requires_reconciliation_before_release: bool = False
+    requires_remote_cancellation: bool = False
 
     @abstractmethod
     def create_payment(self, order, request=None, *, request_id=None) -> PaymentRequest:

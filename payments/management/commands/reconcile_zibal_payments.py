@@ -179,6 +179,11 @@ class Command(BaseCommand):
         report["historical_non_zibal_receipts"] = [p.authority for p in payments if p.gateway != "zibal"]
         report["incomplete_inquiries"] = []
         report["primary_selection_blockers"] = []
+        report["unresolved_provider_payments"] = [p.pk for p in payments if p.reservation_hold]
+        if report["unresolved_provider_payments"]:
+            issue = "Unresolved remote payment operations prevent primary selection; reconcile their provider before recovery."
+            report["blocking_issues"].append(issue)
+            report["primary_selection_blockers"].append(issue)
         if report["unselected_manual_review_receipts"]:
             report["blocking_issues"].append("Unselected manual-review receipts prevent primary selection.")
         primary = [payment for payment in payments if payment.is_successful and not payment.needs_refund]

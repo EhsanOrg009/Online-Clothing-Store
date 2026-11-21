@@ -1,0 +1,13 @@
+{% if payment_options %}
+<fieldset class="flex flex-col gap-3">
+  <legend class="mb-3 font-semibold">روش پرداخت</legend>
+  {% for option in payment_options %}
+  <label class="address-choice flex cursor-pointer items-start gap-3 rounded-lg border border-line p-4">
+    <input type="radio" name="payment_method" value="{{ option.name }}" class="field-checkbox mt-1 shrink-0" required {% if forloop.first %}checked{% endif %}>
+    <span><strong>{{ option.title }}</strong>{% if option.description %}<span class="mt-2 block text-sm leading-7 text-muted">{{ option.description }}</span>{% endif %}</span>
+  </label>
+  {% endfor %}
+</fieldset>
+{% else %}
+<p class="alert alert-warning" role="status">روش پرداخت در حال حاضر در دسترس نیست؛ لطفاً بعداً تلاش کنید یا با پشتیبانی تماس بگیرید.</p>
+{% endif %}

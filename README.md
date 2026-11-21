@@ -576,7 +576,9 @@ class CustomSMSProvider(SMSProvider):
 ---
 ## 💳 Payment Gateway Configuration
 
-Zibal is the only active payment gateway. Its integration follows the [official IPG documentation](https://help.zibal.ir/ipg/) and uses the existing `PaymentGateway` interface.
+Zibal remains the default payment gateway. TorobPay CPG can also be offered when server-side eligibility and checkout details are valid, using the same `PaymentGateway` architecture. Zibal follows the [official IPG documentation](https://help.zibal.ir/ipg/); the supplied TorobPay CPG PDF 1.3.31 is the credit gateway contract.
+
+For optional multi-provider checkout set `PAYMENT_GATEWAYS=zibal,torobpay` while retaining `PAYMENT_GATEWAY=zibal`. Leaving the new list empty preserves the legacy single-provider configuration and its compatible class import path. See the [Persian TorobPay guide](docs/torobpay-payment.md) for credentials, callback registration, currency/cart assumptions, verify/settle, refund safeguards and recovery commands. No live payment, refund or production deployment is implied by local mocked tests.
 
 ```env
 PAYMENT_GATEWAY=zibal

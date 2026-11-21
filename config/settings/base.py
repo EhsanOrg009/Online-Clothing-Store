@@ -275,11 +275,21 @@ OTP_RESEND_LIMIT_PER_HOUR = env.int("OTP_RESEND_LIMIT_PER_HOUR", default=5)
 
 # درگاه پرداخت
 PAYMENT_GATEWAY = env("PAYMENT_GATEWAY", default="zibal")
+# Empty retains the exact legacy single-provider configuration.
+PAYMENT_GATEWAYS = env.list("PAYMENT_GATEWAYS", default=[])
 ZIBAL_MERCHANT = env("ZIBAL_MERCHANT", default="")
 ZIBAL_TIMEOUT_SECONDS = env.float("ZIBAL_TIMEOUT_SECONDS", default=10)
 # Leave empty until Zibal officially confirms the IANA timezone of naive paidAt.
 # Offset-bearing timestamps always use their own offset, regardless of this value.
 ZIBAL_PAID_AT_TIMEZONE = env("ZIBAL_PAID_AT_TIMEZONE", default="")
+TOROBPAY_CLIENT_ID = env("TOROBPAY_CLIENT_ID", default="")
+TOROBPAY_CLIENT_SECRET = env("TOROBPAY_CLIENT_SECRET", default="")
+TOROBPAY_USERNAME = env("TOROBPAY_USERNAME", default="")
+TOROBPAY_PASSWORD = env("TOROBPAY_PASSWORD", default="")
+TOROBPAY_BASE_URL = env("TOROBPAY_BASE_URL", default="https://cpg.torobpay.com").rstrip("/")
+TOROBPAY_TIMEOUT_SECONDS = env.float("TOROBPAY_TIMEOUT_SECONDS", default=10)
+TOROBPAY_TOKEN_REFRESH_BUFFER_SECONDS = env.int("TOROBPAY_TOKEN_REFRESH_BUFFER_SECONDS", default=300)
+TOROBPAY_ALLOWED_PAYMENT_HOSTS = env.list("TOROBPAY_ALLOWED_PAYMENT_HOSTS", default=["cpg.torobpay.com", "torobpay.com"])
 
 # ---------------------------------------------------------------------
 # Logging

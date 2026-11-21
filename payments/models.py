@@ -51,6 +51,14 @@ class Payment(models.Model):
         blank=True,
         help_text=_("توکن یکتایی که درگاه هنگام ایجاد تراکنش برمی‌گرداند."),
     )
+    provider_token = models.TextField(
+        _("شناسهٔ محرمانهٔ ارائه‌دهنده"), blank=True, default="", editable=False,
+        help_text=_("فقط برای تماس سروری؛ در فهرست، گزارش و صفحات مشتری نمایش داده نمی‌شود."),
+    )
+    reservation_hold = models.BooleanField(
+        _("رزرو منتظر تعیین وضعیت درگاه"), default=False, editable=False, db_index=True,
+        help_text=_("انقضا و لغو تا تأیید وضعیت نهایی درگاه موجودی را آزاد نمی‌کنند."),
+    )
     request_id = models.UUIDField(
         _("شناسهٔ درخواست محلی"), unique=True, null=True, blank=True, editable=False,
         help_text=_("برای اتصال پاسخ/بازگشت به تلاش ثبت‌شده؛ کلید idempotency زیبال نیست."),

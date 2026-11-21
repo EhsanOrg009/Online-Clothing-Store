@@ -40,3 +40,4 @@ docker-compose.override.yml
 *.sql.gz.*
 minikandoo-backups/
 zibal-recovery-*.json
+torobpay-recovery-*.json

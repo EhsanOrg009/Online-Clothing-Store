@@ -11,6 +11,8 @@ from accounts.decorators import login_required_message
 from accounts.forms import AddressForm
 from accounts.models import Address
 from cart.services import cart_totals, get_cart
+from payments.checkout import payment_options, select_payment_option
+from payments.services import PaymentError
 
 from .forms import CheckoutNoteForm
 from .models import Order
@@ -135,6 +137,7 @@ def checkout_review(request):
     )
 
     totals = cart_totals(cart, items=items)
+    options = payment_options(customer=request.user, amount=totals.total, address=address)
     note_form = CheckoutNoteForm(request.POST if request.method == "POST" else None)
 
     if request.method == "POST":
@@ -142,18 +145,19 @@ def checkout_review(request):
             messages.error(request, _("یادداشت واردشده معتبر نیست."))
         else:
             try:
+                selection = select_payment_option(options, request.POST)
                 order = create_order(
                     customer=request.user,
                     cart=cart,
                     address=address,
                     customer_note=note_form.cleaned_data["note"],
                 )
-            except OrderError as exc:
+            except (OrderError, PaymentError) as exc:
                 messages.error(request, exc.message)
                 return redirect("orders:checkout_review")
 
             request.session.pop(ADDRESS_SESSION_KEY, None)
-            return _start_payment(order, request)
+            return _start_payment(order, request, selection=selection)
 
     return render(
         request,
@@ -164,17 +168,21 @@ def checkout_review(request):
             "address": address,
             "note_form": note_form,
             "shipping_options": get_shipping_options(),
+            "payment_options": options,
             "step": 2,
         },
     )
 
 
-def _start_payment(order: Order, request):
+def _start_payment(order: Order, request, *, selection=None):
     """ایجاد درخواست پرداخت و هدایت کاربر به درگاه."""
     from payments.services import PaymentError, create_payment_for_order
 
     try:
-        payment = create_payment_for_order(order, request)
+        if selection is None:
+            options = payment_options(customer=order.customer, amount=order.total, address=order)
+            selection = select_payment_option(options, request.POST)
+        payment = create_payment_for_order(order, request, gateway_name=selection.name, authorization=selection.authorization)
     except PaymentError as exc:
         messages.error(request, exc.message)
         return redirect("orders:detail", order_number=order.order_number)
@@ -245,5 +253,6 @@ def order_detail(request, order_number: str):
             "order": order, "payments": payments,
             "refund_pending": order.payments.filter(needs_refund=True).exists(),
             "manual_review_pending": order.manual_review_pending,
+            "payment_options": payment_options(customer=order.customer, amount=order.total, address=order) if order.can_pay else [],
         },
     )

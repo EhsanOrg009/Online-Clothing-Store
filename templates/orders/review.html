@@ -18,7 +18,7 @@
 </div>
 </li>{% endfor %}</ul>
 </section>
-<form method="post" class="card mt-6 flex flex-col gap-5 p-6 sm:p-8">{% csrf_token %}{% include 'partials/accessible_fields.html' with form=note_form %}<p class="text-sm text-muted">با ثبت سفارش، کالاها رزرو می‌شوند و برای پرداخت به درگاه انتقال پیدا می‌کنید.</p><button class="btn-primary btn-lg" type="submit">ثبت سفارش و پرداخت {{ totals.total|currency }}</button>
+<form method="post" class="card mt-6 flex flex-col gap-5 p-6 sm:p-8">{% csrf_token %}{% include 'partials/payment_methods.html' %}{% include 'partials/accessible_fields.html' with form=note_form %}<p class="text-sm text-muted">با ثبت سفارش، کالاها رزرو می‌شوند و برای پرداخت به درگاه انتقال پیدا می‌کنید.</p>{% if payment_options %}<button class="btn-primary btn-lg" type="submit">ثبت سفارش و پرداخت {{ totals.total|currency }}</button>{% endif %}
 </form>
 </div>
 <aside class="workflow-summary">{% include 'partials/order_summary.html' %}<a class="btn-outline mt-4 w-full" href="{% url 'cart:detail' %}">بازگشت به سبد خرید</a>

@@ -28,6 +28,7 @@ from orders.services import OrderError, OrderInventoryUnavailable, OrderNotPayab
 from .gateways import PaymentGatewayError, get_gateway
 from .gateways.zibal import parse_callback
 from .gateways.base import PaymentRequestRejected
+from .gateways.registry import get_enabled_gateway
 from .models import Payment, PaymentCreationStatus
 
 logger = logging.getLogger(__name__)
@@ -118,15 +119,21 @@ def classify_receipt(order, gateway_paid_at, timestamp_issue="", *, primary_exis
     return ReceiptDecision("accept", "paid_within_deadline")
 
 
-def create_payment_for_order(order: Order, request=None) -> Payment:
+def create_payment_for_order(order: Order, request=None, *, gateway_name=None, authorization=None) -> Payment:
     """Persist -> unlocked HTTP -> authoritative Order/Payment application.
 
     Call directly, without an outer atomic transaction. Zibal's documented
     request API has no idempotency key: an uncertain attempt is never resent.
     """
     try:
-        gateway = get_gateway()
-        snapshot, payment, created = _prepare_payment_request(order, gateway)
+        gateway = get_enabled_gateway(gateway_name)
+        authorize = getattr(gateway, "authorize_order", None)
+        if callable(authorize):
+            current = Order.objects.select_related("customer").get(pk=order.pk)
+            if not current.can_pay:
+                raise PaymentError("این سفارش در حال حاضر قابل پرداخت نیست.")
+            authorization = authorize(current, authorization)
+        snapshot, payment, created = _prepare_payment_request(order, gateway, authorization=authorization)
     except PaymentGatewayError as exc:
         raise PaymentError(_("تنظیمات درگاه پرداخت معتبر نیست؛ با پشتیبانی تماس بگیرید.")) from exc
     if not created:
@@ -137,7 +144,7 @@ def create_payment_for_order(order: Order, request=None) -> Payment:
         response = gateway.create_payment(snapshot, request, request_id=payment.request_id)
     except PaymentGatewayError as exc:
         failure = exc
-    payment, error = _finish_payment_request(snapshot, payment, response, failure)
+    payment, error = _finish_payment_request(snapshot, payment, response, failure, gateway=gateway)
     if error:
         # Raise after committing the durable attempt/evidence, never roll it back.
         raise PaymentError(error) from failure
@@ -145,7 +152,7 @@ def create_payment_for_order(order: Order, request=None) -> Payment:
 
 
 @transaction.atomic
-def _prepare_payment_request(order, gateway):
+def _prepare_payment_request(order, gateway, *, authorization=None):
     order = Order.objects.select_for_update().select_related("customer").get(pk=order.pk)
 
     if order.is_paid:
@@ -158,6 +165,8 @@ def _prepare_payment_request(order, gateway):
         raise PaymentError(_("این سفارش در حال حاضر قابل پرداخت نیست."))
     if not order.items.exists():
         raise PaymentError(_("اقلام این سفارش یافت نشد."))
+    if authorization is not None and not authorization.matches(order.customer, order.total, order):
+        raise PaymentError("اطلاعات سفارش تغییر کرده است؛ روش پرداخت را دوباره انتخاب کنید.")
     history = list(order.payments.order_by("pk"))
     if any(p.creation_status in (
         PaymentCreationStatus.REQUESTING, PaymentCreationStatus.UNCERTAIN, PaymentCreationStatus.REVIEW,
@@ -178,20 +187,27 @@ def _prepare_payment_request(order, gateway):
             payment.save(update_fields=["status", "error_message"])
         return order, payment, False
     request_id = uuid4()
+    snapshot = getattr(gateway, "snapshot_for_request", None)
+    if callable(snapshot):
+        order = snapshot(order)
     gateway.payment_request_payload(order, request_id=request_id)
+    digest = getattr(gateway, "request_snapshot_digest", None)
     payment = Payment.objects.create(
         order=order, gateway=gateway.name, amount=order.total,
         request_id=request_id, creation_status=PaymentCreationStatus.REQUESTING,
-        metadata={"creation": {
+        reservation_hold=gateway.requires_reconciliation_before_release,
+        metadata={**({"requires_remote_cancellation": True} if gateway.requires_remote_cancellation else {}), "creation": {
             "request_id": str(request_id), "order_number": order.order_number,
             "amount_toman": str(order.total), "requested_at": timezone.now().isoformat(),
+            **({"snapshot_digest": digest(order, request_id=request_id)} if callable(digest) else {}),
         }},
     )
+    order._payment_attempt_id = payment.pk
     return order, payment, True
 
 
 @transaction.atomic
-def _finish_payment_request(snapshot, attempt, response, failure):
+def _finish_payment_request(snapshot, attempt, response, failure, *, gateway=None):
     order = Order.objects.select_for_update().get(pk=attempt.order_id)
     payment = Payment.objects.select_for_update().get(pk=attempt.pk)
     payment.order = order
@@ -204,6 +220,12 @@ def _finish_payment_request(snapshot, attempt, response, failure):
         or order.total != snapshot.total or order.order_number != snapshot.order_number
         or payment.gateway != attempt.gateway or payment.request_id != attempt.request_id
     )
+    digest = getattr(gateway, "request_snapshot_digest", None)
+    if callable(digest):
+        try:
+            immutable_changed |= digest(order, request_id=payment.request_id) != creation.get("snapshot_digest")
+        except PaymentGatewayError:
+            immutable_changed = True
     if response is not None:
         outcome.update(result=100, track_id=response.authority)
         if payment.authority and payment.authority != response.authority:
@@ -220,6 +242,18 @@ def _finish_payment_request(snapshot, attempt, response, failure):
             payment.metadata["redirect_url"] = response.redirect_url
         else:
             payment.creation_status = PaymentCreationStatus.REVIEW
+        if response.provider_token and payment.authority == response.authority:
+            if payment.provider_token and payment.provider_token != response.provider_token:
+                error = "شناسهٔ محرمانهٔ درگاه با تلاش ثبت‌شده مغایر است؛ نیازمند بررسی پشتیبانی."
+            else:
+                payment.provider_token = response.provider_token
+        for key, data in response.audit.items():
+            previous = payment.metadata.get(key, {})
+            payment.metadata[key] = {**data, **previous} if isinstance(data, dict) and isinstance(previous, dict) else data
+        if response.review_reason:
+            error = response.review_reason
+        if error:
+            payment.creation_status = PaymentCreationStatus.REVIEW
     else:
         rejected = isinstance(failure, PaymentRequestRejected)
         outcome["outcome"] = "rejected" if rejected else "uncertain"
@@ -231,6 +265,7 @@ def _finish_payment_request(snapshot, attempt, response, failure):
             payment.creation_status = PaymentCreationStatus.REJECTED if rejected else PaymentCreationStatus.UNCERTAIN
             if rejected:
                 payment.status = PaymentStatus.FAILED
+                payment.reservation_hold = False
             error = (
                 "درخواست ایجاد پرداخت رد شد. لطفاً بعداً تلاش کنید."
                 if rejected else "نتیجهٔ ایجاد پرداخت مشخص نیست؛ پرداخت تازه انجام ندهید و با پشتیبانی تماس بگیرید."
@@ -250,7 +285,7 @@ def _finish_payment_request(snapshot, attempt, response, failure):
             payment.error_message = error
     creation["responses"] = [*creation.get("responses", []), outcome]
     payment.metadata["creation"] = creation
-    payment.save(update_fields=["authority", "creation_status", "metadata", "status", "error_message"])
+    payment.save(update_fields=["authority", "provider_token", "reservation_hold", "creation_status", "metadata", "status", "error_message"])
     if (
         not error and payment.status == PaymentStatus.PENDING
         and not potentially_successful_receipt(payment) and order.status == OrderStatus.PAYMENT_FAILED
@@ -274,13 +309,13 @@ def potentially_successful_receipt(payment):
         payment.status in (PaymentStatus.SUCCESSFUL, PaymentStatus.MANUAL_REVIEW)
         or payment.paid_at or payment.gateway_paid_at
         or any(isinstance(record, dict) and (
-            record.get("status") == 1 or record.get("successful") is True
+            record.get("status") == 1 or record.get("successful") is True or record.get("receipt_seen") is True
         ) for record in evidence)
     )
 
 
 def receipt_history_fingerprint(payments):
-    fields = ("pk", "order_id", "gateway", "authority", "request_id", "creation_status", "amount", "status", "needs_refund",
+    fields = ("pk", "order_id", "gateway", "authority", "request_id", "creation_status", "reservation_hold", "amount", "status", "needs_refund",
               "transaction_id", "reference_id", "paid_at", "gateway_paid_at", "metadata")
     records = [{key: getattr(payment, key) for key in fields}
                for payment in sorted(payments, key=lambda item: item.pk)]
@@ -328,7 +363,7 @@ def _authorize_recovery_primary(*, order, payments, verified, selected_track_ids
     potential = {p.authority for p in payments if potentially_successful_receipt(p)} | set(verified)
     if (
         not primary or primary.pk not in {p.pk for p in payments}
-        or any(p.creation_status in (PaymentCreationStatus.REQUESTING, PaymentCreationStatus.UNCERTAIN,
+        or any(p.reservation_hold or p.creation_status in (PaymentCreationStatus.REQUESTING, PaymentCreationStatus.UNCERTAIN,
                                      PaymentCreationStatus.REVIEW) or (
             not p.authority and p.creation_status != PaymentCreationStatus.REJECTED
         ) for p in payments)
@@ -412,6 +447,15 @@ def process_callback(payment: Payment, callback_data: dict | None = None, *,
         and recovery_primary_authorized.payment_id == payment.pk and recovery_audit
     ):
         raise PaymentError("Invalid internal recovery primary authorization.")
+    try:
+        gateway = get_gateway(payment.gateway)
+        processor = getattr(gateway, "process_callback", None)
+        if callable(processor):
+            if recovery_audit or recovery_primary_authorized or gateway_timezone or not allow_fulfillment:
+                raise PaymentError("این گزینهٔ بازیابی برای درگاه انتخاب‌شده مجاز نیست.")
+            return processor(payment, callback_data)
+    except PaymentGatewayError as exc:
+        raise PaymentError("تنظیمات درگاه برای تأیید پرداخت در دسترس نیست.") from exc
     snapshot = Payment.objects.select_related("order").only(
         "id", "order_id", "gateway", "authority", "request_id", "amount", "status",
         "order__id", "order__order_number", "order__total",
@@ -476,6 +520,7 @@ def _apply_verified_callback(snapshot, callback_data, result, *, allow_fulfillme
     other_receipts = [p for p in ledger if p.pk != payment.pk]
     other_manual_receipt = any(
         p.status == PaymentStatus.MANUAL_REVIEW
+        or p.reservation_hold
         or (p.status != PaymentStatus.SUCCESSFUL and potentially_successful_receipt(p))
         for p in other_receipts
     )
@@ -617,5 +662,43 @@ def expire_stale_payments(older_than_minutes: int = 60) -> int:
     """تبدیل تراکنش‌های معلق قدیمی به «منقضی» (برای گزارش‌گیری)."""
     threshold = timezone.now() - timedelta(minutes=older_than_minutes)
     return Payment.objects.filter(
-        status=PaymentStatus.PENDING, created_at__lt=threshold
+        status=PaymentStatus.PENDING, created_at__lt=threshold, reservation_hold=False,
     ).update(status=PaymentStatus.EXPIRED, error_message="منقضی شده")
+
+
+def reconcile_before_inventory_release(order):
+    """Optional provider capability. No row locks or surrounding transaction."""
+    for payment in order.payments.filter(reservation_hold=True).order_by("pk"):
+        try:
+            gateway = get_gateway(payment.gateway)
+            reconcile = getattr(gateway, "reconcile_before_release", None)
+            if callable(reconcile):
+                reconcile(payment)
+        except (PaymentGatewayError, PaymentError):
+            logger.warning("Inventory release awaits reconciliation order_id=%s payment_id=%s", order.pk, payment.pk)
+
+
+def cancel_order_with_payment(order, *, actor, evidence=None):
+    """Optional remote cancellation capability, called outside admin atomic forms."""
+    from orders.services import cancel_order
+    current = Order.objects.select_related("customer").get(pk=order.pk)
+    permitted = actor and actor.is_authenticated and actor.is_active and (
+        actor.pk == current.customer_id or (actor.is_staff and actor.has_perm("orders.change_order")
+                                             and actor.has_perm("payments.change_payment"))
+    )
+    if not permitted:
+        raise PaymentError("دسترسی به لغو این سفارش مجاز نیست.")
+    candidates = [payment for payment in current.payments.order_by("pk") if payment.reservation_hold or (
+        payment.is_successful and not payment.needs_refund
+    )]
+    if len(candidates) > 1:
+        raise PaymentError("پیش از لغو، همهٔ پرداخت‌های حل‌نشدهٔ سفارش باید بررسی شوند.")
+    if candidates:
+        try:
+            gateway = get_gateway(candidates[0].gateway)
+            cancel = getattr(gateway, "cancel_order_payment", None)
+            if callable(cancel):
+                return cancel(candidates[0], actor=actor, evidence=evidence).order
+        except PaymentGatewayError as error:
+            raise PaymentError("تنظیمات درگاه برای لغو در دسترس نیست.") from error
+    return cancel_order(current, mark_payment_cancelled=True)

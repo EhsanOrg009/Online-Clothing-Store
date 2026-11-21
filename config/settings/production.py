@@ -45,10 +45,24 @@ if not ALLOWED_HOSTS:  # noqa: F405
 
 if env("DATABASE_PASSWORD", default="") in ("", "change-me"):  # noqa: F405
     raise RuntimeError("رمز عبور دیتابیس در Production تنظیم نشده است.")
-if PAYMENT_GATEWAY not in ("zibal", "payments.gateways.zibal.ZibalGateway"):
-    raise ImproperlyConfigured("PAYMENT_GATEWAY must select Zibal in production.")
-if not ZIBAL_MERCHANT.strip() or ZIBAL_MERCHANT.strip() == "zibal":
+_gateway_aliases = {"zibal": "zibal", "payments.gateways.zibal.ZibalGateway": "zibal",
+                    "torobpay": "torobpay", "payments.gateways.torobpay.TorobPayGateway": "torobpay"}
+_enabled = PAYMENT_GATEWAYS or [PAYMENT_GATEWAY]
+if any(key not in _gateway_aliases for key in _enabled) or PAYMENT_GATEWAY not in _gateway_aliases:
+    raise ImproperlyConfigured("PAYMENT_GATEWAY/PAYMENT_GATEWAYS must select supported payment providers.")
+_enabled_names = [_gateway_aliases[key] for key in _enabled]
+if len(set(_enabled_names)) != len(_enabled_names) or _gateway_aliases[PAYMENT_GATEWAY] not in _enabled_names:
+    raise ImproperlyConfigured("The default gateway must be enabled exactly once.")
+if "zibal" in _enabled_names and (not ZIBAL_MERCHANT.strip() or ZIBAL_MERCHANT.strip() == "zibal"):
     raise ImproperlyConfigured("ZIBAL_MERCHANT must identify a real production merchant.")
+if "torobpay" in _enabled_names:
+    from types import SimpleNamespace
+    from payments.gateways.base import PaymentGatewayError
+    from payments.gateways.torobpay_client import validate_configuration
+    try:
+        validate_configuration(SimpleNamespace(**locals()))
+    except PaymentGatewayError as _error:
+        raise ImproperlyConfigured(str(_error)) from None
 if SMS_PROVIDER in ("sms_ir", "accounts.sms.sms_ir.SMSIRProvider"):
     if not SMS_IR_API_KEY.strip():
         raise ImproperlyConfigured("SMS_IR_API_KEY must be set when SMS_PROVIDER is 'sms_ir'.")

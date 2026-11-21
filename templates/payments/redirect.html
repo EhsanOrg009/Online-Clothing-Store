@@ -2,7 +2,7 @@
 {% load shop_extras %}
 {% block title %}انتقال به درگاه | {{ STORE_NAME }}
 {% endblock %}
-{% block extra_head %}<meta name="referrer" content="strict-origin-when-cross-origin">
+{% block extra_head %}<meta name="referrer" content="{{ gateway_referrer_policy }}">
 <meta http-equiv="refresh" content="1; url={{ redirect_url }}">
 {% endblock %}
 {% block content %}
@@ -15,7 +15,7 @@
 <div class="spec-row"><dt>مبلغ پرداخت</dt><dd>{{ payment.amount|currency }}</dd>
 </div>
 </dl>
-<div class="mt-6 flex flex-wrap gap-3"><a class="btn-primary" href="{{ redirect_url }}" referrerpolicy="strict-origin-when-cross-origin">ورود به درگاه</a><a class="btn-outline" href="{% url 'orders:detail' payment.order.order_number %}">بازگشت به سفارش</a>
+<div class="mt-6 flex flex-wrap gap-3"><a class="btn-primary" href="{{ redirect_url }}" referrerpolicy="{{ gateway_referrer_policy }}">ورود به درگاه</a><a class="btn-outline" href="{% url 'orders:detail' payment.order.order_number %}">بازگشت به سفارش</a>
 </div>
 </section>
 </div>

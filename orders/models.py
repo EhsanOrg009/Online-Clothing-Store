@@ -209,6 +209,10 @@ class Order(TimeStampedModel):
     def payment_review_message(self) -> str:
         if self.is_paid:
             return _("یکی از پرداخت‌های این سفارش نیازمند بررسی پشتیبانی است. لطفاً پرداخت تازه انجام ندهید و با پشتیبانی تماس بگیرید.")
+        if self.pk:
+            message = self.payments.filter(status=PaymentStatus.MANUAL_REVIEW).exclude(error_message="").values_list("error_message", flat=True).first()
+            if message:
+                return message
         return MANUAL_REVIEW_MESSAGE
 
     @property
@@ -256,6 +260,7 @@ class OrderItem(models.Model):
 
     # Snapshot ها
     product_name = models.CharField(_("نام محصول"), max_length=200)
+    category_name = models.CharField(_("دسته‌بندی هنگام سفارش"), max_length=120, blank=True, default="")
     color_name = models.CharField(_("رنگ"), max_length=60)
     size_name = models.CharField(_("سایز"), max_length=30)
     sku = models.CharField(_("کد کالا"), max_length=64, blank=True)

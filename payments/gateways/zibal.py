@@ -93,6 +93,7 @@ def parse_callback(data) -> dict[str, str]:
 
 class ZibalGateway(PaymentGateway):
     name = "zibal"
+    checkout_title = "پرداخت اینترنتی با زیبال"
     api_url = "https://gateway.zibal.ir"
 
     def __init__(self):

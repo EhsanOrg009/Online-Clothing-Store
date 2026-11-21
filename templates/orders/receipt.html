@@ -41,12 +41,12 @@
 </tr>
 </thead>
 <tbody>{% for payment in payments %}<tr><td>{% jalali_datetime payment.created_at %}</td><td>{{ payment.amount|currency }}</td><td>{% include 'partials/status_badge.html' with kind='payment' status=payment.status %}{% if payment.needs_refund %}<span class="badge-warning">نیازمند بازگشت وجه</span>{% endif %}</td><td><bdi dir="ltr">{{ payment.reference_id|default:'—' }}</bdi></td>
-</tr>{% endfor %}</tbody>
+</tr>{% if payment.error_message %}<tr><td colspan="4" class="text-sm text-muted">{{ payment.error_message }}</td></tr>{% endif %}{% endfor %}</tbody>
 </table>
 </div>
 </section>{% endif %}
 </div>
-<aside class="workflow-summary">{% include 'partials/order_summary.html' with totals=order %}{% if order.can_pay and not manual_review_pending %}<form class="mt-4" method="post" action="{% url 'orders:pay' order.order_number %}">{% csrf_token %}<button class="btn-primary btn-lg w-full" type="submit">پرداخت {{ order.total|currency }}</button>
+<aside class="workflow-summary">{% include 'partials/order_summary.html' with totals=order %}{% if order.can_pay and not manual_review_pending %}<form class="mt-4 flex flex-col gap-4" method="post" action="{% url 'orders:pay' order.order_number %}">{% csrf_token %}{% include 'partials/payment_methods.html' %}{% if payment_options %}<button class="btn-primary btn-lg w-full" type="submit">پرداخت {{ order.total|currency }}</button>{% endif %}
 </form>{% endif %}{% if order.is_paid and order.paid_at %}<p class="alert alert-success mt-4">پرداخت تأیید شده در {% jalali_datetime order.paid_at %}</p>{% endif %}<a class="btn-outline mt-4 w-full" href="tel:{{ STORE_PHONE }}">تماس با پشتیبانی</a>
 </aside>
 </div>

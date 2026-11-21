@@ -140,6 +140,7 @@ def create_order(
                 product=product,
                 variant=variant,
                 product_name=product.name,
+                category_name=product.category.name,
                 color_name=variant.color.name,
                 size_name=variant.size.name,
                 sku=variant.sku or "",
@@ -209,7 +210,7 @@ def _refresh_instance(target: Order, source: Order) -> None:
 
 
 @transaction.atomic
-def mark_order_paid(order: Order, paid_at=None, *, gateway_paid_at=None) -> Order:
+def mark_order_paid(order: Order, paid_at=None, *, gateway_paid_at=None, confirmation_at=None) -> Order:
     """Record local acceptance; eligibility uses the independently known gateway time.
 
     paid_at retains its local recording semantics. A delayed callback may pay an
@@ -225,7 +226,9 @@ def mark_order_paid(order: Order, paid_at=None, *, gateway_paid_at=None) -> Orde
     # دفاع نهایی: سفارش لغو/منقضی‌شده نباید «پرداخت‌شده» شود. اگر پول در درگاه
     # گرفته شده، فراخواننده (process_callback) این استثنا را گرفته و تراکنش را
     # برای بازگشت وجه علامت می‌زند؛ وضعیت سفارش دست‌نخورده می‌ماند.
-    effective_time = gateway_paid_at or timezone.now()
+    # CPG has no payment timestamp. A server-confirmed upper bound inside the
+    # active reservation is separate evidence; gateway_paid_at remains NULL.
+    effective_time = gateway_paid_at or confirmation_at or timezone.now()
     if timezone.is_naive(effective_time) or effective_time > timezone.now():
         raise OrderNotPayable(_("زمان قطعی پرداخت قابل مقایسه نیست."))
     if (
@@ -289,6 +292,14 @@ def _apply_cancellation(order: Order, *, mark_payment_cancelled: bool) -> None:
     فقط Instance را در حافظه تغییر می‌دهد؛ ذخیره‌سازی بر عهده فراخواننده است تا
     هر مسیر (لغو مستقیم یا گذار وضعیت) بتواند `update_fields` خودش را انتخاب کند.
     """
+    if order.payments.filter(reservation_hold=True).exists():
+        raise OrderError(_("لغو این سفارش ابتدا به تأیید لغو یا بازپرداخت درگاه نیاز دارد؛ با پشتیبانی پیگیری کنید."))
+    from payments.services import potentially_successful_receipt
+    for payment in order.payments.filter(metadata__requires_remote_cancellation=True).order_by("pk"):
+        if not payment.metadata.get("remote_cancellation_confirmed") and (
+            payment.status != PaymentStatus.FAILED or potentially_successful_receipt(payment)
+        ):
+            raise OrderError(_("لغو سفارش پرداخت‌شده ابتدا باید توسط درگاه تأیید شود؛ با پشتیبانی پیگیری کنید."))
     _restore_stock(order)
     order.status = OrderStatus.CANCELLED
     if mark_payment_cancelled and order.payment_status == PaymentStatus.PENDING:
@@ -331,8 +342,15 @@ def expire_due_orders() -> int:
     now = timezone.now()
     for order in Order.objects.due_for_expiry(now):
         try:
+            # Reconciliation may perform HTTP. It runs before the Order lock;
+            # the hold is rechecked below, including attempts created meanwhile.
+            from payments.services import reconcile_before_inventory_release
+            reconcile_before_inventory_release(order)
             with transaction.atomic():
                 order = Order.objects.select_for_update().get(pk=order.pk)
+                if order.payments.filter(reservation_hold=True).exists():
+                    logger.warning("Order %s retains inventory: remote payment is unresolved", order.order_number)
+                    continue
                 if order.payment_status == PaymentStatus.MANUAL_REVIEW or order.payments.filter(status=PaymentStatus.MANUAL_REVIEW).exists():
                     logger.warning("Order %s retains inventory: payment requires manual review", order.order_number)
                     continue
@@ -379,6 +397,8 @@ def transition_status(order: Order, new_status: str) -> Order:
         )
     if new_status == OrderStatus.PAID and not order.is_paid:
         raise OrderError(_("پرداخت فقط از طریق تأیید درگاه ثبت می‌شود."))
+    if new_status != OrderStatus.CANCELLED and order.payments.filter(reservation_hold=True).exists():
+        raise OrderError(_("پیش از تغییر مرحلهٔ سفارش، نتیجهٔ عملیات درگاه باید تعیین تکلیف شود."))
     if new_status == OrderStatus.CANCELLED:
         _apply_cancellation(order, mark_payment_cancelled=True)
     else:

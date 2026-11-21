@@ -396,7 +396,10 @@ payments/gateways/
 │                 └── get_payment_url(payment) -> str
 ├── zibal.py      درخواست، تایید و استعلام JSON از API رسمی زیبال
 ├── zibal_time.py تفسیر offset واقعی یا IANA رسماً تأییدشده؛ زمان مبهم به بررسی دستی
-└── registry.py   انتخاب بر اساس PAYMENT_GATEWAY
+├── torobpay.py   adapter اعتباری؛ قابلیت‌های اختیاری بدون تغییر الزامی زیبال
+├── torobpay_client.py OAuth، cache مشترک و HTTP با parser دفاعی
+├── torobpay_data.py تبدیل واحد پول و payload از snapshotها
+└── registry.py   انتخاب بر اساس PAYMENT_GATEWAY و فهرست اختیاری PAYMENT_GATEWAYS
 ```
 
 ### جریان کامل
@@ -737,7 +740,9 @@ queryset = queryset.filter(category_id__in=[category_obj.id, *descendant_ids])
 
 ### تنظیم درگاه پرداخت
 
-به بخش [پرداخت](#پرداخت) مراجعه کنید. زیبال تنها درگاه فعال است و با `ZIBAL_MERCHANT` و دامنه بازگشت ثبت‌شده پیکربندی می‌شود.
+به بخش [پرداخت](#پرداخت) مراجعه کنید. زیبال پیش‌فرض است؛ `PAYMENT_GATEWAYS=zibal,torobpay` گزینهٔ اعتباری ترب‌پی را نیز پس از eligibility سروری فعال می‌کند. فهرست خالی رفتار قبلی را حفظ می‌کند. جزئیات، فرض‌های قرارداد PDF و بازیابی در [راهنمای ترب‌پی](docs/torobpay-payment.md) آمده است.
+
+`payments/services.py` فایل واقعی orchestration عمومی است؛ `payments/torobpay_services.py` مراحل چندگانه و lease پایدار ترب‌پی را اجرا می‌کند. HTTP بیرون تراکنش است؛ نوشتن نتیجه با ترتیب قفل `Order → Payment → ProductVariant` انجام می‌شود. `provider_token` محرمانه و `reservation_hold` مخصوص جلوگیری از آزادسازی زودهنگام اضافه شده‌اند؛ authority ترب‌پی fingerprint توکن است و authority زیبال تغییر نمی‌کند. `OrderItem.category_name` snapshot زمان ثبت سفارش است و از کاتالوگ امروز برای سوابق قدیمی backfill نمی‌شود. گزینهٔ Mock در checkout فعلی وجود ندارد و رفتار رد آن حفظ شده است.
 
 ### افزودن سرویس پیامک واقعی
 

@@ -20,7 +20,11 @@ class PaymentCreationMigrationTests(PaymentFixtureMixin, TransactionTestCase):
     def setUp(self):
         super().setUp()
         self.build_payment_data()
-        self.addCleanup(self.migrate, self.latest)
+        self.leaves = MigrationExecutor(connection).loader.graph.leaf_nodes()
+        self.addCleanup(self.restore_schema)
+
+    def restore_schema(self):
+        MigrationExecutor(connection).migrate(self.leaves)
 
     def migrate(self, target):
         executor = MigrationExecutor(connection)
@@ -52,7 +56,9 @@ class PaymentCreationMigrationTests(PaymentFixtureMixin, TransactionTestCase):
                                          request_id=uuid4(), creation_status=PaymentCreationStatus.UNCERTAIN)
         with self.assertRaises(IrreversibleError):
             self.migrate(self.previous)
-        payment.refresh_from_db()
+        # Later additive migrations may already have reversed when 0004's own
+        # guard refuses removal. Inspect the evidence protected by 0004 only.
+        payment.refresh_from_db(fields=["authority", "request_id", "creation_status"])
         self.assertIsNone(payment.authority)
         self.assertIsNotNone(payment.request_id)
         self.assertEqual(payment.creation_status, PaymentCreationStatus.UNCERTAIN)

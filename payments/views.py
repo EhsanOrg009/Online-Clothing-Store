@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from django.contrib import messages
-from django.http import Http404
+from django.http import Http404, HttpResponseBadRequest, HttpResponseNotFound, QueryDict
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils.translation import gettext_lazy as _
-from django.views.decorators.http import require_GET
+from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.csrf import csrf_exempt
+from urllib.parse import parse_qsl
 
 from accounts.decorators import login_required_message
 from orders.choices import PaymentStatus
@@ -63,10 +65,51 @@ def payment_redirect(request, pk: int):
     response = render(
         request,
         "payments/redirect.html",
-        {"payment": payment, "redirect_url": redirect_url},
+        {"payment": payment, "redirect_url": redirect_url, "gateway_referrer_policy": gateway.redirect_referrer_policy},
     )
     # Start زیبال Referer می‌خواهد؛ فقط origin فروشگاه ارسال می‌شود.
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Referrer-Policy"] = gateway.redirect_referrer_policy
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@csrf_exempt
+@require_POST
+def torobpay_callback(request, request_id):
+    """External form POST only; no session writes on a cross-site return.
+
+SameSite=Lax can omit the existing login cookie on POST. Creating a message
+session here could replace it. Customer-safe outcomes are persisted by the
+service and displayed on the following GET instead.
+    """
+    from .gateways.torobpay_data import CALLBACK_MAX_BYTES
+    from .torobpay_services import handle_callback
+
+    try:
+        length = request.META.get("CONTENT_LENGTH", "")
+        if (request.content_type != "application/x-www-form-urlencoded" or request.GET
+                or (length and (not length.isascii() or not length.isdecimal() or int(length) > CALLBACK_MAX_BYTES))):
+            raise ValueError
+        body = request.body
+        if len(body) > CALLBACK_MAX_BYTES or request.encoding not in (None, "utf-8", "UTF-8"):
+            raise ValueError
+        pairs = parse_qsl(body.decode("ascii"), keep_blank_values=True, strict_parsing=True,
+                          encoding="utf-8", errors="strict", max_num_fields=3)
+        callback = QueryDict("", mutable=True)
+        for key, value in pairs:
+            callback.appendlist(key, value)
+    except (ValueError, UnicodeError):
+        return HttpResponseBadRequest("درخواست بازگشت پرداخت معتبر نیست.")
+    try:
+        payment = handle_callback(request_id, callback)
+    except PaymentError:
+        return HttpResponseBadRequest("اطلاعات بازگشت پرداخت معتبر یا قابل تطبیق نیست.")
+    if payment is None:
+        return HttpResponseNotFound("تلاش پرداخت یافت نشد.")
+    response = _result_redirect(payment)
+    response.status_code = 303
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
